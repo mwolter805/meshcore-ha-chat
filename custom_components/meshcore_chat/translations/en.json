@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MeshCore Chat",
+        "description": "Add the MeshCore Chat companion integration. The core meshcore integration must also be installed for the panel to receive messages."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "MeshCore Chat is already configured.",
+      "meshcore_not_installed": "The MeshCore integration is not installed. Install it from HACS first, then add MeshCore Chat."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "MeshCore Chat options",
+        "description": "Tune how long the message store retains conversation history. Changes take effect on the next message save and at the next Home Assistant restart.",
+        "data": {
+          "max_messages_per_conversation": "Max messages per conversation",
+          "message_retention_days": "Message retention (days)"
+        },
+        "data_description": {
+          "max_messages_per_conversation": "When a conversation exceeds this number, the oldest messages are trimmed first. Range: 50 \u2013 5000. Default: 500.",
+          "message_retention_days": "Messages older than this are pruned at startup and during periodic cleanup. Range: 1 \u2013 365. Default: 90."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Node / frontend build cache
+node_modules/
+.rollup.cache/
+
+# Ignore generic dist/ (Python builds, etc.) but DO track the panel
+# bundle — HACS users install the prebuilt artifact and never run npm.
+dist/
+!custom_components/meshcore_chat/frontend/dist/
+!custom_components/meshcore_chat/frontend/dist/**
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
