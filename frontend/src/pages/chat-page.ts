@@ -468,7 +468,7 @@ export class ChatPage extends LitElement {
             ${this._manageOpen ? html`
               <meshcore-manage-dialog
                 .hass=${this.hass}
-                .entryId=${this.config?.node_prefix}
+                .entryId=${this.config?.entry_id}
                 .narrow=${this.narrow}
                 @manage-closed=${() => this._manageOpen = false}
                 @contacts-changed=${this._onContactsChanged}
@@ -514,7 +514,7 @@ export class ChatPage extends LitElement {
           <div class="search-panel">
             <meshcore-message-search
               .hass=${this.hass}
-              .entryId=${this.config?.node_prefix}
+              .entryId=${this.config?.entry_id}
               .entityId=${this._currentEntityId || undefined}
               .meshNodeName=${this.config?.node_name}
               @result-selected=${this._onSearchResultSelected}
@@ -524,7 +524,7 @@ export class ChatPage extends LitElement {
         ${this._manageOpen ? html`
           <meshcore-manage-dialog
             .hass=${this.hass}
-            .entryId=${this.config?.node_prefix}
+            .entryId=${this.config?.entry_id}
             .narrow=${this.narrow}
             @manage-closed=${() => this._manageOpen = false}
             @contacts-changed=${this._onContactsChanged}
@@ -771,7 +771,7 @@ export class ChatPage extends LitElement {
    */
   private _markActiveRead(entityId: string | null): void {
     if (!entityId || !this.hass) return;
-    markConversationRead(this.hass, entityId, this.config?.node_prefix).catch(() => {});
+    markConversationRead(this.hass, entityId, this.config?.entry_id).catch(() => {});
     this.dispatchEvent(new CustomEvent('unread-cleared', {
       detail: { entityId },
       bubbles: true,

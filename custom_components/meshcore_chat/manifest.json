@@ -5,6 +5,7 @@
   "codeowners": ["@mwolter805"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "websocket_api", "meshcore"],
+  "_meshcore_min_version": "2.6.0",
   "documentation": "https://github.com/mwolter805/meshcore-ha-chat",
   "issue_tracker": "https://github.com/mwolter805/meshcore-ha-chat/issues",
   "integration_type": "service",

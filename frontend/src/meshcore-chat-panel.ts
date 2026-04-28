@@ -58,8 +58,6 @@ export class MeshCorePanel extends LitElement {
   @state() private _targetPickerOpen = false;
   @state() private _pendingTraceEntryId: string | undefined = undefined;
 
-  private _boundVisibilityHandler: (() => void) | null = null;
-
   static styles = [
     panelStyles,
     css`
@@ -356,20 +354,11 @@ export class MeshCorePanel extends LitElement {
     super.connectedCallback();
     this._loadData();
     this._setupSubscriptions();
-
-    // Listen for tab visibility changes to recover from backgrounding
-    this._boundVisibilityHandler = () => this._onVisibilityChange();
-    document.addEventListener('visibilitychange', this._boundVisibilityHandler);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this._teardownSubscriptions();
-
-    if (this._boundVisibilityHandler) {
-      document.removeEventListener('visibilitychange', this._boundVisibilityHandler);
-      this._boundVisibilityHandler = null;
-    }
   }
 
   /**
@@ -428,23 +417,6 @@ export class MeshCorePanel extends LitElement {
       });
       this._unsubscribeList = [];
     }
-  }
-
-  /**
-   * Handle browser tab visibility changes.
-   * When the tab becomes visible again after being backgrounded, the HA
-   * WebSocket connection may have been replaced. Tear down stale subscriptions,
-   * re-subscribe on the current connection, and refresh data.
-   */
-  private _onVisibilityChange() {
-    if (document.visibilityState !== 'visible') return;
-
-    // Re-subscribe on the (potentially new) hass.connection
-    this._setupSubscriptions();
-
-    // Refresh stale data
-    this._loadDeviceData();
-    this._loadUnreadCounts();
   }
 
   updated(changedProperties: Map<string, unknown>) {
@@ -702,6 +674,7 @@ export class MeshCorePanel extends LitElement {
       this._config = {
         node_name: device.name,
         node_prefix: device.pubkey_prefix?.substring(0, 6) || '',
+        entry_id: device.entry_id,
         ...MESHCORE_PRESET,
         ...DEFAULT_PANEL_CONFIG,
       };
@@ -736,6 +709,7 @@ export class MeshCorePanel extends LitElement {
           ...this._config,
           node_name: device.name,
           node_prefix: device.pubkey_prefix?.substring(0, 6) || '',
+          entry_id: device.entry_id,
         };
       }
     } catch (err) {
@@ -939,34 +913,6 @@ export class MeshCorePanel extends LitElement {
     this._traceDialogOpen = true;
   };
 }
-
-// ---------------------------------------------------------------------------
-// Recovery listener for HA's suspendWhenHidden feature.
-//
-// When the tab is backgrounded for >5 minutes, HA's partial-panel-resolver
-// removes <ha-panel-custom> from the DOM. ha-panel-custom.disconnectedCallback()
-// calls _cleanupPanel(), which destroys <meshcore-panel> and nulls
-// _setProperties. When the tab returns, <ha-panel-custom> is re-attached but
-// empty — ha-panel-custom has no connectedCallback() to recreate its children.
-//
-// This module-level listener survives the element destruction because it is
-// registered on `document` at module load time, not inside the element.
-// It detects the blank state and forces a page reload to recover.
-// ---------------------------------------------------------------------------
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
-
-  // Delay to let HA's _onVisible() re-attach <ha-panel-custom> first
-  setTimeout(() => {
-    const customPanel = document.querySelector('ha-panel-custom');
-    if (!customPanel) return; // Not on the meshcore panel route
-
-    if (!customPanel.querySelector('meshcore-chat-panel')) {
-      console.warn('[MeshCore] Panel destroyed by suspendWhenHidden — reloading page');
-      window.location.reload();
-    }
-  }, 500);
-});
 
 declare global {
   interface HTMLElementTagNameMap {

@@ -105,7 +105,7 @@ Copy `custom_components/meshcore_chat/` into your HA `config/custom_components/`
 ## Requirements
 
 - Home Assistant 2024.12 or newer
-- The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) installed and configured
+- The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) **v2.6.0 or newer** installed and configured. The chat companion calls the structured query services (`meshcore.get_contacts`, `meshcore.trace`) introduced in 2.6.0 (released 2026-04-27); on older versions the trace dialog returns a *"service not registered"* error and the contact list falls back to a legacy code path with a one-time warning in the logs.
 
 ## Relationship to other projects
 

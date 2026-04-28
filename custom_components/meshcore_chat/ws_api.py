@@ -66,6 +66,72 @@ def _get_all_coordinators(hass: HomeAssistant) -> list:
     ]
 
 
+# One-shot guard so the legacy-fallback warning fires at most once per
+# process — without this, a busy panel that polls contacts every few
+# seconds against an old meshcore install would flood the log.
+_LEGACY_CONTACTS_FALLBACK_LOGGED = False
+
+
+async def _get_contacts_via_service(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> list | None:
+    """Fetch contacts via the documented meshcore.get_contacts service.
+
+    Returns the contacts list on success, an empty list when the service
+    reports an error envelope (no_coordinator / coordinator_error), or
+    None when there is no MeshCore coordinator at all (caller maps to
+    "not_found"). Callers that need to distinguish "no coordinator" from
+    "service-side error" should inspect the legacy direct-coordinator
+    path instead — but in practice the chat panel just shows a generic
+    "no coordinator" toast in either case.
+
+    Falls back to ``coordinator.get_all_contacts()`` on installs running
+    meshcore<2.6.0 (no service registered), so existing users don't lose
+    contact-list functionality during the version-floor announcement
+    window. The fallback warning is logged at most once per process.
+    """
+    if not hass.services.has_service(MESHCORE_DOMAIN, "get_contacts"):
+        global _LEGACY_CONTACTS_FALLBACK_LOGGED
+        if not _LEGACY_CONTACTS_FALLBACK_LOGGED:
+            _LOGGER.warning(
+                "meshcore.get_contacts service not registered — falling back "
+                "to coordinator.get_all_contacts(). Upgrade to meshcore>=2.6.0 "
+                "for the documented public surface."
+            )
+            _LEGACY_CONTACTS_FALLBACK_LOGGED = True
+        coordinator = _get_coordinator(hass, entry_id)
+        if not coordinator:
+            return None
+        return list(coordinator.get_all_contacts() or [])
+
+    service_data: dict = {}
+    if entry_id:
+        service_data["entry_id"] = entry_id
+
+    try:
+        result = await hass.services.async_call(
+            MESHCORE_DOMAIN,
+            "get_contacts",
+            service_data,
+            blocking=True,
+            return_response=True,
+        )
+    except Exception as ex:
+        _LOGGER.error("meshcore.get_contacts service call failed: %s", ex)
+        return None
+
+    if not result:
+        return None
+    # Service returns {"contacts": [...]} on success and
+    # {"contacts": [], "error": "..."} on error envelopes. Treat either
+    # as "no usable data" by checking for a non-empty list before the
+    # presence-of-error flag — the chat doesn't surface the upstream
+    # error string today, so collapse to the existing "not_found" UX.
+    if "error" in result and not result.get("contacts"):
+        return None
+    return list(result.get("contacts") or [])
+
+
 def _get_store(
     hass: HomeAssistant, entry_id: str | None = None
 ) -> MessageStore | None:
@@ -178,15 +244,19 @@ def ws_get_devices(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
-@callback
-def ws_get_contacts(hass, connection, msg):
-    """Return all contacts for the specified (or first) config entry."""
-    coordinator = _get_coordinator(hass, msg.get("entry_id"))
-    if not coordinator:
+@websocket_api.async_response
+async def ws_get_contacts(hass, connection, msg):
+    """Return all contacts for the specified (or first) config entry.
+
+    Delegates to the upstream meshcore.get_contacts service (PR #216,
+    meshcore>=2.6.0), with a legacy fallback to
+    coordinator.get_all_contacts() for users on older meshcore — see
+    _get_contacts_via_service.
+    """
+    contacts = await _get_contacts_via_service(hass, msg.get("entry_id"))
+    if contacts is None:
         connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
         return
-
-    contacts = coordinator.get_all_contacts()
     connection.send_result(msg["id"], {"contacts": contacts})
 
 
@@ -234,17 +304,17 @@ def _compute_type_counts(contacts: list) -> dict:
         ),
     }
 )
-@callback
-def ws_get_contacts_paginated(hass, connection, msg):
+@websocket_api.async_response
+async def ws_get_contacts_paginated(hass, connection, msg):
     """Return paginated contacts with filtering and type counts.
 
-    Inlined from upstream feature/sidebar-panel `coordinator.get_contacts_paginated`
-    — companion-supporting `dev/combined` doesn't ship that helper. All filtering
-    and sorting runs against `coordinator.get_all_contacts()`. See `_compute_type_counts`.
-    TODO(v0.2): hoist into `coordinator_facade`.
+    Filters/sorts/paginates the contact list returned by upstream's
+    meshcore.get_contacts service (PR #216, meshcore>=2.6.0). The
+    upstream service deliberately doesn't ship a paginated/filtered
+    variant — companions own this layer.
     """
-    coordinator = _get_coordinator(hass, msg.get("entry_id"))
-    if not coordinator:
+    all_contacts = await _get_contacts_via_service(hass, msg.get("entry_id"))
+    if all_contacts is None:
         connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
         return
 
@@ -254,8 +324,6 @@ def ws_get_contacts_paginated(hass, connection, msg):
     limit = msg["limit"]
     offset = msg["offset"]
     sort_by = msg["sort_by"]
-
-    all_contacts = coordinator.get_all_contacts()
 
     # Category filter (added vs discovered)
     if category == "added":
@@ -317,21 +385,19 @@ def ws_get_contacts_paginated(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
-@callback
-def ws_get_node_counts(hass, connection, msg):
+@websocket_api.async_response
+async def ws_get_node_counts(hass, connection, msg):
     """Return node counts for each primary filter category.
 
-    Inlined from upstream feature/sidebar-panel `coordinator.get_node_counts` —
-    companion-supporting `dev/combined` doesn't ship that helper. Counts are
-    derived from `coordinator.get_all_contacts()`. TODO(v0.2): hoist into
-    `coordinator_facade`.
+    Counts are derived from the contact list returned by upstream's
+    meshcore.get_contacts service (PR #216, meshcore>=2.6.0). Like
+    paginated, this filtering layer is owned by the companion.
     """
-    coordinator = _get_coordinator(hass, msg.get("entry_id"))
-    if not coordinator:
+    all_contacts = await _get_contacts_via_service(hass, msg.get("entry_id"))
+    if all_contacts is None:
         connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
         return
 
-    all_contacts = coordinator.get_all_contacts()
     added = sum(1 for c in all_contacts if c.get("added_to_node"))
     discovered = sum(1 for c in all_contacts if not c.get("added_to_node"))
     connection.send_result(
@@ -1475,8 +1541,83 @@ async def ws_remove_contact(hass, connection, msg):
 
 
 # ─── meshcore/trace ─────────────────────────────────────────────────
-# Runs a MeshCore trace against a contact and measures round-trip time.
-# Uses send_trace SDK method with a random tag for correlation.
+# Discovery-mode traces delegate to the upstream meshcore.trace service
+# (PR #216, meshcore>=2.6.0). Explicit-path traces (when 'path' is
+# provided) keep the original inlined SDK plumbing because the upstream
+# service does not currently accept an explicit-path argument — see
+# Session 53 / Session 55 Addendum 2 in the meshcore-ha workspace log
+# for the production case the explicit-path branch protects.
+
+
+def _trace_error_for(
+    upstream_code: str, result: dict | None, msg: dict
+) -> tuple[str, str]:
+    """Translate an upstream meshcore.trace error envelope into the
+    pre-migration ``(chat_code, message)`` pair the frontend has always
+    seen.
+
+    Plumbs through the upstream service's optional ``reason`` field so
+    failures keep their diagnostic detail. See
+    ``docs/Proposed - Migrate meshcore-ha-chat to PR #216 services.md``
+    in the meshcore-ha workspace for the design rationale (Phase A
+    error-message preservation).
+    """
+    pubkey = msg.get("pubkey_prefix", "")
+    reason = (result or {}).get("reason")
+
+    if upstream_code == "no_coordinator":
+        return "not_found", "No active MeshCore coordinator"
+    if upstream_code == "not_connected":
+        return "not_connected", "Device not connected"
+    if upstream_code == "contact_not_found":
+        return (
+            "not_in_mesh",
+            f"No mesh record for {pubkey} — the device must have seen "
+            "this node's advertisement at least once to trace it.",
+        )
+    if upstream_code == "contact_not_on_device":
+        return (
+            "contact_not_on_device",
+            "This contact isn't on your device yet — the device can only "
+            "trace contacts it's stored. Add the contact to the device "
+            "first, then try trace again.",
+        )
+    if upstream_code == "contact_missing_pubkey":
+        return "error", "Contact has no public key; cannot construct trace target hash."
+    if upstream_code == "path_discovery_failed":
+        # Service may include reason="no_firmware_ack" for the no-ack
+        # case; the malformed-PATH_RESPONSE case uses no reason.
+        if reason == "no_firmware_ack":
+            return (
+                "path_discovery_failed",
+                "Device did not acknowledge the path-discovery request.",
+            )
+        return (
+            "path_discovery_failed",
+            "Path discovery response was malformed (missing out_path_len).",
+        )
+    if upstream_code == "path_discovery_rejected":
+        return (
+            "path_discovery_rejected",
+            f"Node rejected path-discovery request: {reason or 'unknown'}",
+        )
+    if upstream_code == "path_discovery_timeout":
+        # Upstream service does not return the timeout duration used,
+        # so the message drops the "within Xs" suffix the pre-migration
+        # version included. Decision: option 3 in proposal.
+        return (
+            "path_discovery_timeout",
+            "No PATH_RESPONSE — the contact did not reply. Try again later.",
+        )
+    if upstream_code == "send_failed":
+        return "send_failed", f"Device rejected trace: {reason or 'unknown'}"
+    if upstream_code == "timeout":
+        return "timeout", "Trace timed out — no response received"
+    if upstream_code in ("await_failed", "internal_error"):
+        return "error", f"Internal error during trace: {upstream_code}"
+    # Unknown upstream code — likely a firmware-supplied passthrough
+    # string (per PR #217 docs). Surface it raw so users can report it.
+    return "error", str(upstream_code)
 
 
 @websocket_api.websocket_command(
@@ -1485,8 +1626,8 @@ async def ws_remove_contact(hass, connection, msg):
         vol.Required("pubkey_prefix"): str,
         vol.Optional("entry_id"): str,
         # Optional comma-separated hex hops, e.g. "86,AE".  When provided,
-        # backend skips path discovery and calls send_trace() with this path
-        # directly.  Absent/empty → existing path-discovery behavior.
+        # backend skips path discovery and calls send_trace() with this
+        # path directly.  Absent/empty → upstream meshcore.trace service.
         vol.Optional("path"): str,
     }
 )
@@ -1496,7 +1637,99 @@ async def ws_trace(
     connection: websocket_api.ActiveConnection,
     msg: dict,
 ) -> None:
-    """Run a trace against a contact and measure round-trip time."""
+    """Run a trace against a contact and measure round-trip time.
+
+    Discovery-mode traces (default) delegate to the upstream
+    ``meshcore.trace`` service (PR #216, requires meshcore>=2.6.0). The
+    upstream service was lifted from this exact code in PR #216, so
+    behavior is identical: round-trip 1-byte-hash path construction
+    (Mesh.cpp:41-66), pre-registered PATH_RESPONSE listener, 15 s
+    flood-discovery floor, ``added_to_node`` gate, etc.
+
+    Explicit-path traces (``msg["path"]`` supplied) bypass the service
+    and call ``mesh_core.commands.send_trace`` directly, preserving the
+    Session 53 / Session 55 Addendum 2 workaround for production cases
+    where flood path discovery doesn't return a PATH_RESPONSE.
+
+    The frontend's ``TraceResult`` shape (``frontend/src/api.ts:355``)
+    is preserved unchanged across both branches — no frontend changes.
+    """
+    if msg.get("path"):
+        await _ws_trace_explicit(hass, connection, msg)
+        return
+
+    if not hass.services.has_service(MESHCORE_DOMAIN, "trace"):
+        connection.send_error(
+            msg["id"],
+            "service_unavailable",
+            "Upstream meshcore.trace service not registered — "
+            "requires meshcore>=2.6.0. Update the meshcore integration.",
+        )
+        return
+
+    service_data: dict = {"pubkey_prefix": msg["pubkey_prefix"]}
+    if msg.get("entry_id"):
+        service_data["entry_id"] = msg["entry_id"]
+
+    try:
+        result = await hass.services.async_call(
+            MESHCORE_DOMAIN,
+            "trace",
+            service_data,
+            blocking=True,
+            return_response=True,
+        )
+    except Exception as ex:
+        _LOGGER.error("Error calling meshcore.trace: %s", ex)
+        connection.send_error(msg["id"], "error", str(ex))
+        return
+
+    trace = (result or {}).get("trace")
+    if trace is None:
+        # Service returned a structured error. Map back to the chat's
+        # pre-migration error codes + message text so frontend toasts
+        # read identically to today.
+        upstream_code = (result or {}).get("error", "error")
+        chat_code, message = _trace_error_for(upstream_code, result, msg)
+        connection.send_error(msg["id"], chat_code, message)
+        return
+
+    # Reshape into the existing TraceResult shape (TS interface in
+    # frontend/src/api.ts:355). Service returns hops/path/round_trip_ms/
+    # final_snr/tag at trace.* — the WS contract is the same fields at
+    # top level plus a formatted response_time string.
+    rtt = int(trace.get("round_trip_ms", 0))
+    connection.send_result(msg["id"], {
+        "round_trip_ms": rtt,
+        "response_time": f"{rtt}ms",
+        "hops": trace.get("hops", 0),
+        "final_snr": trace.get("final_snr"),
+        "path": trace.get("path", []),
+    })
+
+
+async def _ws_trace_explicit(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Inlined explicit-path trace handler.
+
+    When the user supplies an explicit comma-hex hop sequence via the
+    ``path`` parameter, bypass ``meshcore.trace`` and call
+    ``mesh_core.commands.send_trace`` directly. The upstream service
+    (PR #216) does not accept an explicit-path argument; if it gains
+    one, this branch can collapse into the service call and the
+    SDK-level coupling here disappears.
+
+    Why this branch exists: Session 53 (2026-04-20) DEBUG capture
+    showed multi-hop flood path discovery does not reliably return a
+    PATH_RESPONSE for all reachable targets (e.g. Otay RPTR via
+    ca.cv.main-st: firmware accepts + broadcasts the request, but no
+    response ever arrives). The native MeshCoreOne iOS app works
+    around this by letting the user type the hop sequence manually;
+    this branch mirrors that workaround.
+    """
     import asyncio
     import random
 
@@ -1511,347 +1744,66 @@ async def ws_trace(
         return
 
     pubkey_prefix = msg["pubkey_prefix"]
+    explicit_path = msg["path"]  # caller (ws_trace) guaranteed non-empty
 
-    # Resolve contact to get public key bytes for the trace path.
-    # get_contact_by_prefix searches both added and discovered contacts; a
-    # miss here means this node's advertisement was never seen by the
-    # source device, so trace has nothing to work with.
     contact = coordinator.get_contact_by_prefix(pubkey_prefix)
     if not contact:
         connection.send_error(
             msg["id"],
             "not_in_mesh",
-            f"No mesh record for {pubkey_prefix} — the device must have seen this node's advertisement at least once to trace it.",
+            f"No mesh record for {pubkey_prefix} — the device must have seen "
+            "this node's advertisement at least once to trace it.",
         )
         return
-
-    # Firmware's CMD_SEND_PATH_DISCOVERY_REQ handler (MeshCore/examples/
-    # companion_radio/MyMesh.cpp:1564-1592) looks up the target contact by
-    # full-pubkey memcmp against its on-device contact array.  Discovered-only
-    # contacts live in HA's _discovered_contacts dict but are never pushed to
-    # the radio's contact table, so firmware responds ERR_CODE_NOT_FOUND
-    # immediately.  Fail fast with an actionable message instead of making the
-    # round-trip just to decode a firmware "not found".
     if not contact.get("added_to_node"):
         connection.send_error(
             msg["id"],
             "contact_not_on_device",
-            "This contact isn't on your device yet — the device can only trace contacts it's stored. "
-            "Add the contact to the device first, then try trace again.",
+            "This contact isn't on your device yet — the device can only "
+            "trace contacts it's stored. Add the contact to the device "
+            "first, then try trace again.",
         )
         return
 
     try:
-        # Generate random tag for correlating the response
         tag = random.randint(0, 0xFFFFFFFF)
 
-        # Build the trace path from the contact's known outbound route.
-        #
-        # A trace packet's `path` argument is a sequence of per-hop repeater
-        # hashes along the route to the target, NOT the target's own pubkey.
-        # The contact entry carries the route the device last used to reach
-        # this contact as (out_path_len, out_path_hash_mode, out_path):
-        #   - out_path_len           number of hops; -1 means flood (no known path)
-        #   - out_path_hash_mode     0/1/2 → hash size 1/2/4 bytes per hop
-        #   - out_path               hex of the path bytes (already null-stripped)
-        out_path_len = contact.get("out_path_len", -1)
-        out_path_hash_mode = contact.get("out_path_hash_mode", 0)
-
-        # User-supplied path overrides any stored or to-be-discovered route.
-        # Session 53 DEBUG capture (2026-04-20) showed that multi-hop flood
-        # path discovery does not reliably return a PATH_RESPONSE for all
-        # reachable targets (e.g. Otay RPTR via ca.cv.main-st: firmware
-        # accepts + broadcasts the request, but no response ever arrives).
-        # The native MeshCoreOne iOS app works around this by letting the
-        # user type the hop sequence manually; this branch mirrors that
-        # workaround.  send_trace() accepts "xx,yy" hex strings directly
-        # and derives its flags byte from the hop-hash length, so we can
-        # pass the user's input through unchanged.
-        explicit_path = msg.get("path")
-        if explicit_path:
-            hops = [h.strip() for h in explicit_path.split(",") if h.strip()]
-            out_path_len = len(hops)
-            # Derive hash_mode from the first hop's length (all hops must
-            # share the same length; send_trace() will re-validate).
-            # 2 hex chars = 1 byte = mode 0, 4 chars = 2 bytes = mode 1, etc.
-            hop_hash_len = (len(hops[0]) // 2) if hops else 1
-            out_path_hash_mode = {1: 0, 2: 1, 4: 2}.get(hop_hash_len, 0)
-            _LOGGER.debug(
-                "ws_trace: using explicit path for %s: %s (%d hops, hash_mode=%d)",
-                pubkey_prefix, explicit_path, out_path_len, out_path_hash_mode,
-            )
-        elif out_path_len == -1:
-            # Flood contact — the device has no cached path.  Run a
-            # path-discovery pass first so we learn the outbound route,
-            # then fall through to send_trace with the discovered path.
-            _LOGGER.debug(
-                "ws_trace: flood contact %s; issuing path discovery",
-                pubkey_prefix,
-            )
-            try:
-                dst_bytes = bytes.fromhex(contact["public_key"])
-            except (KeyError, ValueError) as ex:
-                connection.send_error(
-                    msg["id"], "error",
-                    f"Contact has no usable public key for path discovery: {ex}",
-                )
-                return
-
-            # Two-step path discovery so we can distinguish immediate
-            # firmware rejection (ERROR with a reason) from a real
-            # PATH_RESPONSE timeout.  send_path_discovery_sync() collapses
-            # both outcomes to None, which made every failure look like a
-            # timeout even when the firmware had told us exactly why it
-            # refused the request.
-            #
-            # Start the PATH_RESPONSE listener BEFORE sending the PATH_REQ
-            # so there is no window in which the response could arrive and
-            # be dispatched before our subscription is installed.  Filter
-            # by target pubkey_prefix so concurrent path-discovery traffic
-            # for other contacts can't satisfy this wait with a stale or
-            # unrelated payload.  Mirrors Remote-Terminal-for-MeshCore's
-            # approach at app/routers/contacts.py:443-458.
-            import asyncio as _asyncio
-            from meshcore.events import EventType as _EventType
-            path_response_task = _asyncio.create_task(
-                api.mesh_core.dispatcher.wait_for_event(
-                    _EventType.PATH_RESPONSE,
-                    attribute_filters={"pubkey_pre": pubkey_prefix},
-                    timeout=30.0,  # outer safety; real bound set below
-                )
-            )
-            pd_data = b"\x34\x00" + dst_bytes
-            send_result = await api.mesh_core.commands.send(
-                pd_data,
-                [_EventType.MSG_SENT, _EventType.ERROR],
-            )
-            if send_result is None:
-                _LOGGER.debug(
-                    "ws_trace: path discovery got no reply from firmware layer for %s",
-                    pubkey_prefix,
-                )
-                path_response_task.cancel()
-                connection.send_error(
-                    msg["id"],
-                    "path_discovery_failed",
-                    "Device did not acknowledge the path-discovery request.",
-                )
-                return
-            if getattr(send_result, "type", None) == _EventType.ERROR:
-                # Firmware PacketType.ERROR carries {"error_code", "code_string"}
-                # per meshcore_py/src/meshcore/reader.py:85-94 (code_string from
-                # events.py:71 ErrorMessages when the byte is mapped).  The
-                # reader's internal parse-failure dispatches at reader.py
-                # 402/412/426/433/448/456/477/481 use {"reason"} instead —
-                # accept either shape and fall back to error_code for unmapped
-                # codes so the user sees something actionable.
-                reason = "unknown"
-                if isinstance(send_result.payload, dict):
-                    p = send_result.payload
-                    reason = (
-                        p.get("code_string")
-                        or p.get("reason")
-                        or (f"error_code={p['error_code']}" if "error_code" in p else "unknown")
-                    )
-                elif send_result.payload is not None:
-                    reason = repr(send_result.payload)
-                _LOGGER.debug(
-                    "ws_trace: path discovery rejected by firmware for %s: %s (payload=%r)",
-                    pubkey_prefix, reason, send_result.payload,
-                )
-                path_response_task.cancel()
-                connection.send_error(
-                    msg["id"],
-                    "path_discovery_rejected",
-                    f"Node rejected path-discovery request: {reason}",
-                )
-                return
-            # MSG_SENT — firmware accepted and broadcast the request.
-            # Wait on the pre-created listener task created above.  Raise
-            # the floor from 4.0s (Session 51b default) to 15.0s to match
-            # Remote-Terminal-for-MeshCore (app/routers/contacts.py:447):
-            # two-hop flood PATH_REQ + PATH_RESPONSE round-trips are
-            # routinely in the 5-12s range under real LoRa conditions, so
-            # 4s gave up before the mesh had reasonable time to answer.
-            # Honor firmware's suggested_timeout if it ever exceeds 15s,
-            # but never use a shorter budget.
-            suggested_ms = 0
-            if isinstance(send_result.payload, dict):
-                suggested_ms = send_result.payload.get("suggested_timeout", 0) or 0
-            pd_timeout = max(suggested_ms / 800.0, 15.0)
-            _LOGGER.debug(
-                "ws_trace: path discovery accepted for %s, waiting up to %.1fs for PATH_RESPONSE (suggested_timeout=%s)",
-                pubkey_prefix, pd_timeout, suggested_ms,
-            )
-            try:
-                path_event = await _asyncio.wait_for(
-                    path_response_task, timeout=pd_timeout,
-                )
-            except _asyncio.TimeoutError:
-                path_response_task.cancel()
-                path_event = None
-            if path_event is None:
-                connection.send_error(
-                    msg["id"],
-                    "path_discovery_timeout",
-                    f"No PATH_RESPONSE within {pd_timeout:.1f}s — the contact did not reply. Try again later.",
-                )
-                return
-
-            # PATH_RESPONSE payload carries the discovered outbound route.
-            # meshcore_py/reader.py:847-868 populates out_path_len,
-            # out_path_hash_len, and out_path on the event but does NOT
-            # update the contact record, so we read these straight off the
-            # event payload instead of re-fetching the contact.
-            discovered = path_event.payload or {}
-            out_path_len = discovered.get("out_path_len", -1)
-            if out_path_len < 0:
-                # Malformed PATH_RESPONSE (no out_path_len).  A real
-                # 0-hop (direct-neighbor) discovery is now handled by
-                # the round-trip path construction below — target
-                # consumes the single hash + retransmits, sender
-                # receives it — so we only reject the malformed case.
-                connection.send_error(
-                    msg["id"],
-                    "path_discovery_failed",
-                    "Path discovery response was malformed (missing out_path_len).",
-                )
-                return
-
-            out_path_hash_len = discovered.get("out_path_hash_len", 1)
-            # hash_mode 0/1/2 → 1/2/4 bytes; derive mode from length.
-            out_path_hash_mode = {1: 0, 2: 1, 4: 2}.get(out_path_hash_len, 0)
-            out_path_hex_full = discovered.get("out_path", "") or ""
-            # Override contact-derived values so the existing path-bytes
-            # construction below uses the discovered route.
-            contact = {
-                **contact,
-                "out_path_len": out_path_len,
-                "out_path_hash_mode": out_path_hash_mode,
-                "out_path": out_path_hex_full,
-            }
-
-        if explicit_path:
-            # Pass the user's comma-hex string through unchanged — send_trace()
-            # parses it internally and its debug log shows the exact input
-            # verbatim, which aids diagnosis if a typo slips through.
-            #
-            # Session 55 Addendum 2: pass flags=None so the SDK derives
-            # flags from the user's per-hop hex width
-            # (meshcore_py/messaging.py:249-268).  Forcing a pre-computed
-            # flags value here breaks explicit input whose width doesn't
-            # match the contact's cached hash mode.
-            trace_path_arg = explicit_path
-            flags = None
-        else:
-            # Session 55 Addendum 1: round-trip path construction.  TRACE
-            # protocol (Mesh.cpp:41-66) only fires onTraceRecv on nodes
-            # where (path_len << path_sz) >= len.  For the sender to
-            # receive the trace result, the hash list must round-trip
-            # back to the sender's radio range — i.e. outbound hops +
-            # target + reverse(outbound hops).  Packet.cpp:41-50 mixes
-            # path_len into the TRACE packet hash, so repeated hashes
-            # don't trigger hasSeen dedup at mirror hops.
-            #
-            # 0-hop direct-neighbor case: outbound_hops is empty, so the
-            # round-trip collapses to just [target_hash].  The target
-            # consumes the single hash, appends SNR, retransmits; the
-            # retransmit is received by the sender.
-            #
-            # Session 55 Addendum 2: force 1-byte hashes (flags=0)
-            # regardless of the contact's cached out_path_hash_mode.
-            # 2-byte traces fail to complete round-trip in production
-            # meshes (empirically observed vs MeshCoreOne, which uses
-            # 1-byte and succeeds).  Root cause in firmware not
-            # identified; decision based on MeshCoreOne-matches-works,
-            # 2-byte-fails.
-            flags = 0
-            path_hash_len = 1 << flags  # = 1 byte
-            target_pubkey_hex = (contact.get("public_key", "") or "")
-            target_hash_hex = target_pubkey_hex[: path_hash_len * 2]  # first 1 byte
-            if not target_hash_hex:
-                connection.send_error(
-                    msg["id"], "error",
-                    "Contact has no public key; cannot construct trace target hash.",
-                )
-                return
-            # The stored out_path is in the contact's cached hash mode
-            # width.  We want 1-byte hops, so take the first 2 hex chars
-            # (1 byte) of each stored hop regardless of stored width.
-            out_path_hex = (contact.get("out_path", "") or "")
-            stored_hop_width = {0: 2, 1: 4, 2: 8}.get(out_path_hash_mode, 2)
-            outbound_hops = []
-            for i in range(out_path_len):
-                start = i * stored_hop_width
-                stored_hop = out_path_hex[start : start + stored_hop_width]
-                if len(stored_hop) >= 2:
-                    outbound_hops.append(stored_hop[:2])  # truncate to 1 byte
-            return_hops = list(reversed(outbound_hops))
-            full_path_hex = (
-                "".join(outbound_hops) + target_hash_hex + "".join(return_hops)
-            )
-            trace_path_arg = bytes.fromhex(full_path_hex)
-            _LOGGER.debug(
-                "ws_trace: round-trip path for %s: hops=%s target=%s (full=%s, flags=0)",
-                pubkey_prefix, outbound_hops, target_hash_hex, full_path_hex,
-            )
+        # Pass the user's comma-hex string through unchanged — send_trace()
+        # parses it internally and its debug log shows the exact input
+        # verbatim, which aids diagnosis if a typo slips through.
+        # Session 55 Addendum 2: pass flags=None so the SDK derives flags
+        # from the user's per-hop hex width
+        # (meshcore_py/messaging.py:249-268).
+        trace_path_arg = explicit_path
+        flags = None
+        out_path_len = len([h for h in explicit_path.split(",") if h.strip()])
+        _LOGGER.debug(
+            "ws_trace: explicit path for %s: %s (%d hops)",
+            pubkey_prefix, explicit_path, out_path_len,
+        )
 
         start_time = time.monotonic()
 
-        # Set up a future to capture the trace response.
-        #
-        # TRACE_DATA events flow through forward_all_events() in __init__.py,
-        # which re-fires every SDK event on the HA bus as `meshcore_raw_event`
-        # with `{event_type: str, payload: dict, timestamp: float}`.  The
-        # payload shape for a trace response (meshcore_py/reader.py:645-696):
-        #
-        #   {
-        #     "tag": int,
-        #     "auth": int,
-        #     "flags": int,
-        #     "path_len": int,           # hop count (0 = direct reception)
-        #     "path": [                  # only present when path_len > 0
-        #       {"hash": "xx", "snr": float},  # per intermediate hop
-        #       ...,
-        #       {"snr": float}           # final node (this device), no hash
-        #     ]
-        #   }
+        # TRACE_DATA correlation via the catch-all raw-event bus —
+        # forward_all_events() in __init__.py re-fires every SDK event
+        # as meshcore_raw_event with {event_type, payload, timestamp}.
         response_future: asyncio.Future = hass.loop.create_future()
 
         def _on_raw_event(event):
-            """Listen for TRACE_DATA events and match on our tag."""
             data = event.data or {}
-            event_type = data.get("event_type", "") or ""
-            # str(EventType.TRACE_DATA) yields "EventType.TRACE_DATA"; use
-            # substring match so both the enum-repr and bare-value forms work.
-            if "TRACE_DATA" not in event_type:
+            if "TRACE_DATA" not in (data.get("event_type", "") or ""):
                 return
             payload = data.get("payload") or {}
             if payload.get("tag") == tag and not response_future.done():
                 response_future.set_result(payload)
 
-        # Subscribe to the catch-all raw-event bus; TRACE_DATA is dispatched
-        # here by forward_all_events() in __init__.py.
         unsub = hass.bus.async_listen(f"{MESHCORE_DOMAIN}_raw_event", _on_raw_event)
 
         try:
-            # Send trace request: auth_code=0, tag, flags, path.
-            #
-            # send_trace() returns an Event: MSG_SENT on success, ERROR on
-            # immediate SDK- or firmware-layer rejection (e.g. invalid path
-            # format, unsupported path type, firmware length check failure).
-            # Without inspecting the return, an immediate rejection looks
-            # identical to "packet sent but response never came" — we'd wait
-            # the full 15 s before reporting a generic timeout.
             from meshcore.events import EventType as _EventType
-            # Render the path argument for the log: string for explicit,
-            # hex() for bytes from the discovery/cached branch.
-            _log_path = trace_path_arg if isinstance(trace_path_arg, str) else trace_path_arg.hex()
-            _LOGGER.debug(
-                "ws_trace: sending trace tag=%08x flags=%s path=%s (out_path_len=%d, explicit=%s)",
-                tag, ("auto" if flags is None else flags), _log_path, out_path_len, bool(explicit_path),
+            send_result = await api.mesh_core.commands.send_trace(
+                0, tag, flags, trace_path_arg
             )
-            send_result = await api.mesh_core.commands.send_trace(0, tag, flags, trace_path_arg)
             if send_result is None or getattr(send_result, "type", None) == _EventType.ERROR:
                 reason = "no_response"
                 if send_result is not None and isinstance(send_result.payload, dict):
@@ -1864,21 +1816,19 @@ async def ws_trace(
                 )
                 return
 
-            # Wait for response with timeout
+            # Bound the TRACE_DATA wait using the device's suggested
+            # timeout * 1.2, with sensible floor/ceiling.
             timeout_ms = (api.self_info or {}).get("suggested_timeout", 15000)
             timeout_s = min(max(timeout_ms / 1000.0 * 1.2, 5.0), 60.0)
 
             try:
                 response_data = await asyncio.wait_for(response_future, timeout=timeout_s)
-                elapsed = time.monotonic() - start_time
-                round_trip_ms = int(elapsed * 1000)
+                round_trip_ms = int((time.monotonic() - start_time) * 1000)
 
-                # Path is only populated when path_len > 0.  When path_len
-                # is 0 (direct reception), final_snr is unknown.
+                # Path is only populated when path_len > 0. The final
+                # entry in path[] is the local device's SNR on receiving
+                # the trace echo; earlier entries carry per-hop SNRs.
                 path = response_data.get("path") or []
-                # The final entry in path[] is the local device's SNR on
-                # receiving the trace echo; earlier entries carry per-hop
-                # SNRs on the return leg.
                 final_snr = None
                 if path and "snr" in path[-1]:
                     final_snr = path[-1]["snr"]
@@ -1891,12 +1841,15 @@ async def ws_trace(
                     "path": path,
                 })
             except asyncio.TimeoutError:
-                connection.send_error(msg["id"], "timeout", "Trace timed out — no response received")
+                connection.send_error(
+                    msg["id"], "timeout",
+                    "Trace timed out — no response received",
+                )
         finally:
             unsub()
 
     except Exception as ex:
-        _LOGGER.error("Error in ws_trace: %s", ex)
+        _LOGGER.error("Error in ws_trace explicit-path: %s", ex)
         connection.send_error(msg["id"], "error", str(ex))
 
 

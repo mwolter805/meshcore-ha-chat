@@ -35,6 +35,7 @@ from .const import (
     EVENT_MESHCORE_DELIVERY_UPDATE,
     EVENT_MESHCORE_DISCONNECTED,
     EVENT_MESHCORE_MESSAGE,
+    MESHCORE_DOMAIN,
 )
 from .message_store import MessageStore
 from .panel import async_register_panel, async_remove_panel
@@ -52,7 +53,7 @@ _LISTENERS_KEY = "listeners"
 # async_unload_entry to distinguish "another entry is still around" from
 # "only flags remain — safe to tear down process-global state".
 _DOMAIN_FLAGS = frozenset(
-    {"_panel_registered", "_ws_registered", "unread_tracker"}
+    {"_panel_registered", "_ws_registered", "unread_tracker", "_service_surface_logged"}
 )
 
 
@@ -98,6 +99,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not bucket.get("_ws_registered"):
         async_register_ws_commands(hass)
         bucket["_ws_registered"] = True
+
+    # One-shot detection of the upstream meshcore service surface this
+    # companion depends on. Surfaces an INFO line per-process so support
+    # requests on degraded behavior (older meshcore) are diagnosable from
+    # the HA log without re-running anything.
+    if not bucket.get("_service_surface_logged"):
+        bucket["_service_surface_logged"] = True
+        _LOGGER.info(
+            "MeshCore Chat startup — companion-integration services available: "
+            "get_contacts=%s get_channels=%s trace=%s",
+            hass.services.has_service(MESHCORE_DOMAIN, "get_contacts"),
+            hass.services.has_service(MESHCORE_DOMAIN, "get_channels"),
+            hass.services.has_service(MESHCORE_DOMAIN, "trace"),
+        )
 
     # Subscribe to upstream meshcore events.
     entry_bucket[_LISTENERS_KEY] = [
