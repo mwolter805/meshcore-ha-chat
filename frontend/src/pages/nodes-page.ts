@@ -21,24 +21,15 @@ const NODE_TYPE_MAP: Record<NodeType, number> = {
   sensors: 4,
 };
 
-const TYPE_COLORS: Record<NodeType, string> = {
-  clients: '#4caf50',
-  repeaters: '#ff9800',
-  room_servers: '#9c27b0',
-  sensors: '#607d8b',
-};
+// Type / category colours moved into CSS classes (.l1-btn.<category>,
+// .l2-btn.<type>) since iter18 -- per-button colour grammar lives in
+// the stylesheet, not in inline style attributes.
 
 const TYPE_LABELS: Record<NodeType, string> = {
   clients: 'Clients',
   repeaters: 'Repeaters',
   room_servers: 'Room Servers',
   sensors: 'Sensors',
-};
-
-const CATEGORY_COLORS: Record<PrimaryCategory, string> = {
-  all: '',
-  added: '#03a9f4',
-  discovered: '#4caf50',
 };
 
 @customElement('meshcore-nodes-page')
@@ -130,11 +121,34 @@ export class NodesPage extends LitElement {
       color: var(--primary-text-color);
     }
 
+    /* Inactive left-edge accent — same alpha as the active border
+       below, so the active/inactive transition doesn't visibly jump
+       in saturation. */
+    .l1-btn.added,
+    .l1-btn.all         { border-left-color: rgba(3, 169, 244, 0.5); }
+    .l1-btn.discovered  { border-left-color: rgba(76, 175, 80, 0.5); }
+
+    /* Active state: translucent category background + saturated text,
+       matching the per-card category-badge treatment so the filter
+       reads as the same tag concept. Normalize border-left-width back
+       to 1px so the filled active button isn't visibly chunkier on the
+       left than the other three sides (the 3px accent only makes
+       sense as an inactive-state visual cue). */
     .l1-btn.active {
-      background: var(--primary-color, #03a9f4);
-      color: #fff;
-      border-color: var(--primary-color, #03a9f4);
-      border-left-color: var(--primary-color, #03a9f4);
+      border-left-width: 1px;
+    }
+    .l1-btn.active.all,
+    .l1-btn.active.added {
+      background: rgba(3, 169, 244, 0.15);
+      color: #0277bd;
+      border-color: rgba(3, 169, 244, 0.5);
+      border-left-color: rgba(3, 169, 244, 0.5);
+    }
+    .l1-btn.active.discovered {
+      background: rgba(76, 175, 80, 0.15);
+      color: #2e7d32;
+      border-color: rgba(76, 175, 80, 0.5);
+      border-left-color: rgba(76, 175, 80, 0.5);
     }
 
     .l1-count {
@@ -170,9 +184,40 @@ export class NodesPage extends LitElement {
       color: var(--primary-text-color);
     }
 
+    /* Inactive L2 left-edge accent — same alpha as the active border
+       below for a clean active/inactive transition. */
+    .l2-btn.clients      { border-left: 2px solid rgba(76, 175, 80, 0.5); }
+    .l2-btn.repeaters    { border-left: 2px solid rgba(255, 152, 0, 0.5); }
+    .l2-btn.room_servers { border-left: 2px solid rgba(156, 39, 176, 0.5); }
+    .l2-btn.sensors      { border-left: 2px solid rgba(96, 125, 139, 0.5); }
+
+    /* When active, normalize the left edge back to 1px so the filled
+       button doesn't have a chunkier left border than its other edges. */
     .l2-btn.active {
-      color: #fff;
-      border-color: transparent;
+      border-left-width: 1px;
+    }
+
+    /* Active L2: same translucent treatment as L1 active and the
+       per-card avatar/category-badge. */
+    .l2-btn.active.clients {
+      background: rgba(76, 175, 80, 0.15);
+      color: #388e3c;
+      border-color: rgba(76, 175, 80, 0.5);
+    }
+    .l2-btn.active.repeaters {
+      background: rgba(255, 152, 0, 0.15);
+      color: #f57c00;
+      border-color: rgba(255, 152, 0, 0.5);
+    }
+    .l2-btn.active.room_servers {
+      background: rgba(156, 39, 176, 0.15);
+      color: #7b1fa2;
+      border-color: rgba(156, 39, 176, 0.5);
+    }
+    .l2-btn.active.sensors {
+      background: rgba(96, 125, 139, 0.15);
+      color: #455a64;
+      border-color: rgba(96, 125, 139, 0.5);
     }
 
     .l2-count {
@@ -459,13 +504,11 @@ export class NodesPage extends LitElement {
   private _renderL1Button(category: PrimaryCategory, label: string) {
     const count = this._l1Counts[category];
     const isActive = this._primaryFilter === category;
-    const classes = `l1-btn ${isActive ? 'active' : ''}`;
-    const accentColor = CATEGORY_COLORS[category];
+    const classes = `l1-btn ${category} ${isActive ? 'active' : ''}`;
 
     return html`
       <button
         class=${classes}
-        style=${!isActive && accentColor ? `border-left-color: ${accentColor}` : ''}
         @click=${() => this._setPrimaryFilter(category)}>
         ${label} <span class="l1-count">(${count})</span>
       </button>
@@ -480,11 +523,9 @@ export class NodesPage extends LitElement {
       .filter((t) => this._typeCounts[t] > 0)
       .map((t) => {
         const isActive = this._typeFilter === t;
-        const color = TYPE_COLORS[t];
         return html`
           <button
-            class=${`l2-btn ${isActive ? 'active' : ''}`}
-            style=${isActive ? `background: ${color}; border-color: ${color};` : `border-left: 2px solid ${color};`}
+            class=${`l2-btn ${t} ${isActive ? 'active' : ''}`}
             @click=${() => this._setTypeFilter(t)}>
             ${TYPE_LABELS[t]} <span class="l2-count">(${this._typeCounts[t]})</span>
           </button>

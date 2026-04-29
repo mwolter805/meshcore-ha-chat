@@ -12,6 +12,8 @@ import {
 import '../components/confirm-dialog';
 import '../components/command-dialog';
 import '../components/sensor-tile';
+import '../components/node-summary';
+import type { CompanionDeviceDescriptor } from '../components/node-summary';
 import { panelStyles } from '../styles';
 import { loadMeshcoreEntityRegistry, type EntityInfo } from '../utils/classify-entity';
 
@@ -202,12 +204,21 @@ export class SettingsPage extends LitElement {
         align-items: center;
         justify-content: space-between;
         margin-bottom: 16px;
+        gap: 8px;
+        flex-wrap: wrap;
       }
 
       .section-title {
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .section-title > div:last-child {
+        min-width: 0;
+        flex: 1 1 auto;
       }
 
       .section-icon {
@@ -229,6 +240,9 @@ export class SettingsPage extends LitElement {
         font-size: 16px;
         font-weight: 600;
         color: var(--primary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .device-meta {
@@ -250,6 +264,8 @@ export class SettingsPage extends LitElement {
         font-size: 11px;
         font-weight: 600;
         flex-shrink: 0;
+        white-space: nowrap;
+        max-width: 100%;
       }
 
       .status-badge.online {
@@ -804,18 +820,12 @@ export class SettingsPage extends LitElement {
 
         ${entities.length > 0
           ? html`
-              <div class="subsection-label">Sensors${hiddenCount > 0 ? html` <span style="opacity:0.6">(${hiddenCount} hidden)</span>` : nothing}</div>
-              <div class="sensor-grid">
-                ${entities.map(e => html`
-                  <meshcore-sensor-tile
-                    .hass=${this.hass}
-                    .entityId=${e.entity_id}
-                    .label=${e.label}
-                    .icon=${e.icon}
-                    .colorScheme=${e.colorScheme}>
-                  </meshcore-sensor-tile>
-                `)}
-              </div>
+              <meshcore-node-summary
+                .hass=${this.hass}
+                .device=${this._companionDescriptor(d)}
+                .entities=${entities}
+                .hiddenCount=${hiddenCount}>
+              </meshcore-node-summary>
             `
           : nothing}
 
@@ -1468,6 +1478,21 @@ export class SettingsPage extends LitElement {
 
   private _getCompanionDeviceKey(): string {
     return this.selectedDevice?.entry_id || 'companion';
+  }
+
+  /** Build the discriminated-union descriptor that node-summary expects.
+   *  selectedDevice is a MeshCoreDevice (different shape than ManagedDevice);
+   *  the synthesized object below adds the `type: 'companion'` discriminator
+   *  and projects the fields node-summary actually reads. */
+  private _companionDescriptor(d: MeshCoreDevice): CompanionDeviceDescriptor {
+    return {
+      type: 'companion',
+      name: d.name,
+      pubkey_prefix: d.pubkey_prefix,
+      connected: d.connected,
+      firmware: d.firmware,
+      entry_id: d.entry_id,
+    };
   }
 
   private _loadHiddenSensors() {

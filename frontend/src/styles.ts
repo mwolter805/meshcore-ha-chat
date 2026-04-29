@@ -33,6 +33,25 @@ export const panelStyles = css`
     --scrollbar-thumb: var(--chat-card-scrollbar-thumb, var(--scrollbar-thumb-color, #c1c1c1));
     --system-msg-color: var(--chat-card-system-msg-color, var(--secondary-text-color, #727272));
     --error-color: var(--error-color, #db4437);
+
+    /* ─── Semantic threshold-band colours ───
+       Used by the node-summary aggregated card (and any future component
+       wanting good/warn/bad/info semantics). The hex defaults match the
+       battery / status palette already scattered through this stylesheet
+       (#4caf50, #ff9800, #f44336, #2196f3) so no net new palette is
+       introduced — these named variables just give the existing colours
+       a semantic handle.
+
+       *-bg variants are the translucent fills used by status badges,
+       map-link chips, and any chip-style backgrounds the card adds. */
+    --good: var(--meshcore-good, #4caf50);
+    --warn: var(--meshcore-warn, #ff9800);
+    --bad:  var(--meshcore-bad,  #f44336);
+    --info: var(--meshcore-info, #2196f3);
+    --good-bg: var(--meshcore-good-bg, rgba(76, 175, 80, 0.18));
+    --warn-bg: var(--meshcore-warn-bg, rgba(255, 152, 0, 0.18));
+    --bad-bg:  var(--meshcore-bad-bg,  rgba(244, 67, 54, 0.18));
+    --info-bg: var(--meshcore-info-bg, rgba(33, 150, 243, 0.18));
   }
 
   /* === Panel Layout === */

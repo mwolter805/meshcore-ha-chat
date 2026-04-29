@@ -10,6 +10,7 @@ export class ContactCard extends LitElement {
   static styles = css`
     :host {
       display: block;
+      height: 100%;
     }
 
     .contact-card {
@@ -22,6 +23,8 @@ export class ContactCard extends LitElement {
       cursor: pointer;
       transition: all 0.15s;
       background: var(--card-background-color, #fff);
+      height: 100%;
+      box-sizing: border-box;
     }
 
     .contact-card:hover {
@@ -35,21 +38,26 @@ export class ContactCard extends LitElement {
     }
 
     .contact-avatar {
-      width: 44px;
-      height: 44px;
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
-      color: #fff;
       display: flex;
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
     }
+    /* Scale down the inline 20px SVG icons inside avatars so the
+       glyph reads as a tag-glyph, not a primary visual. */
+    .contact-avatar svg { width: 16px; height: 16px; }
 
-    .contact-avatar.client { background: #4caf50; }
-    .contact-avatar.repeater { background: #ff9800; }
-    .contact-avatar.room-server { background: #9c27b0; }
-    .contact-avatar.sensor { background: #607d8b; }
-    .contact-avatar.unknown { background: var(--primary-color, #03a9f4); }
+    /* Translucent backgrounds + saturated icon colour. Mirrors the
+       category-badge treatment below so the avatar reads as a tag,
+       not a brand-bright disc. */
+    .contact-avatar.client      { background: rgba(76, 175, 80, 0.15);  color: #388e3c; }
+    .contact-avatar.repeater    { background: rgba(255, 152, 0, 0.15);  color: #f57c00; }
+    .contact-avatar.room-server { background: rgba(156, 39, 176, 0.15); color: #7b1fa2; }
+    .contact-avatar.sensor      { background: rgba(96, 125, 139, 0.15); color: #455a64; }
+    .contact-avatar.unknown     { background: rgba(3, 169, 244, 0.15);  color: #0288d1; }
 
     .contact-info {
       flex: 1;

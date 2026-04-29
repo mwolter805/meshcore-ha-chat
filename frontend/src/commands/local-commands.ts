@@ -200,7 +200,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
       {
         name: 'mode',
         type: 'select',
-        description: 'Path hash mode (0=disabled, 1=8-bit, 2=16-bit)',
+        description: 'Path hash mode (0=1-Byte, 1=2-Byte, 2=3-Byte)',
         required: true,
         options: ['0', '1', '2'],
       },

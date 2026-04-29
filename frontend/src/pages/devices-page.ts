@@ -1,9 +1,10 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { panelStyles } from '../styles';
-import type { HomeAssistant, PanelConfig, ManagedDevice, MeshCoreDevice, NeighborInfo } from '../types';
-import { getManagedDevices, executeRemote, getNeighbors } from '../api';
+import type { HomeAssistant, PanelConfig, ManagedDevice, MeshCoreDevice, NeighborInfo, Contact } from '../types';
+import { getManagedDevices, executeRemote, getNeighbors, getContacts } from '../api';
 import '../components/sensor-tile';
+import '../components/node-summary';
 import '../components/snr-chart';
 import '../components/confirm-dialog';
 import '../components/command-dialog';
@@ -21,6 +22,10 @@ export class DevicesPage extends LitElement {
     repeaters: [],
     clients: [],
   };
+
+  /** Contacts indexed by pubkey_prefix for cheap location-fallback
+   *  lookup at render time. Loaded once after device fetch. */
+  @state() private _contactsByPrefix: Record<string, Contact> = {};
 
   @state() private _loading = true;
   @state() private _error: string | null = null;
@@ -120,12 +125,21 @@ export class DevicesPage extends LitElement {
         align-items: center;
         justify-content: space-between;
         margin-bottom: 16px;
+        gap: 8px;
+        flex-wrap: wrap;
       }
 
       .section-title {
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .section-title > div:last-child {
+        min-width: 0;
+        flex: 1 1 auto;
       }
 
       .section-icon {
@@ -157,6 +171,9 @@ export class DevicesPage extends LitElement {
         font-size: 16px;
         font-weight: 600;
         color: var(--primary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .device-meta {
@@ -178,6 +195,8 @@ export class DevicesPage extends LitElement {
         font-size: 11px;
         font-weight: 600;
         flex-shrink: 0;
+        white-space: nowrap;
+        max-width: 100%;
       }
 
       .status-badge.online {
@@ -803,6 +822,25 @@ export class DevicesPage extends LitElement {
     const showNeighbors = type === 'repeater' && device.neighbors_enabled;
     const neighborState = this._neighborData[device.pubkey_prefix];
 
+    // Append uptime to the status label when online ("Online · 12d 19h").
+    // node-summary hides the uptime row from the table because the value
+    // lives here. Look up the uptime entity via the entity classifier's
+    // metricKey tag.
+    const uptimeInfo = entities.find(e => e.metricKey === 'uptime_hours');
+    const uptimeLabel = isOnline && uptimeInfo
+      ? this._formatUptimeFromEntity(uptimeInfo.entity_id)
+      : '';
+
+    // Look up the contact for this device by pubkey_prefix to surface its
+    // lat/lon as the Location hero tile fallback when no dedicated
+    // location sensors exist (typical for managed repeaters/clients).
+    // Also pass last_advert so the "Updated X ago" line under the coords
+    // reflects when the contact was last heard (Unix seconds).
+    const contact = this._contactsByPrefix[device.pubkey_prefix?.toLowerCase()];
+    const fallbackLat = contact?.adv_lat;
+    const fallbackLon = contact?.adv_lon;
+    const fallbackUpdated = contact?.last_advert;
+
     // Lazy-load neighbors on first render if enabled
     if (showNeighbors && !neighborState) {
       this._loadNeighbors(device);
@@ -834,25 +872,22 @@ export class DevicesPage extends LitElement {
                  @click=${() => device.status_entity_id && this._fireMoreInfo(device.status_entity_id)}
                  style="${device.status_entity_id ? 'cursor:pointer' : ''}">
               <span class="status-dot ${statusClass}"></span>
-              ${statusLabel}
+              ${statusLabel}${uptimeLabel ? html` · ${uptimeLabel}` : nothing}
             </div>
           </div>
         </div>
 
         ${entities.length > 0
           ? html`
-              <div class="subsection-label">Sensors${hiddenCount > 0 ? html` <span style="opacity:0.6">(${hiddenCount} hidden)</span>` : nothing}</div>
-              <div class="sensor-grid">
-                ${entities.map(e => html`
-                  <meshcore-sensor-tile
-                    .hass=${this.hass}
-                    .entityId=${e.entity_id}
-                    .label=${e.label}
-                    .icon=${e.icon}
-                    .colorScheme=${e.colorScheme}>
-                  </meshcore-sensor-tile>
-                `)}
-              </div>
+              <meshcore-node-summary
+                .hass=${this.hass}
+                .device=${{ ...device, type }}
+                .entities=${entities}
+                .hiddenCount=${hiddenCount}
+                .fallbackLatitude=${fallbackLat}
+                .fallbackLongitude=${fallbackLon}
+                .fallbackUpdated=${fallbackUpdated}>
+              </meshcore-node-summary>
             `
           : nothing}
 
@@ -1090,10 +1125,29 @@ export class DevicesPage extends LitElement {
       this._error = null;
       const result = await getManagedDevices(this.hass, this.config?.node_prefix);
       this._managedDevices = result;
+      // Load contacts in parallel so the Location hero tile has fallback
+      // lat/lon for managed devices that don't expose location sensors.
+      // Failure is non-fatal — Location tile will just render "—".
+      this._loadContacts();
     } catch (error) {
       this._error = `Failed to load devices: ${String(error)}`;
     } finally {
       this._loading = false;
+    }
+  }
+
+  private async _loadContacts() {
+    if (!this.hass) return;
+    try {
+      const entryId = this.selectedDevice?.entry_id || this.config?.node_prefix;
+      const contacts = await getContacts(this.hass, entryId);
+      const indexed: Record<string, Contact> = {};
+      for (const c of contacts) {
+        if (c.pubkey_prefix) indexed[c.pubkey_prefix.toLowerCase()] = c;
+      }
+      this._contactsByPrefix = indexed;
+    } catch {
+      // Best-effort; absence just means no fallback location.
     }
   }
 
@@ -1121,6 +1175,34 @@ export class DevicesPage extends LitElement {
       composed: true,
     });
     this.dispatchEvent(event);
+  }
+
+  /** Format an uptime sensor's value as "12d 19h" / "5h 30m" / "47s".
+   *  Reads the unit_of_measurement attribute to handle d/h/min/s. */
+  private _formatUptimeFromEntity(entityId: string): string {
+    const s = this.hass?.states[entityId];
+    if (!s || s.state === 'unavailable' || s.state === 'unknown') return '';
+    const raw = parseFloat(s.state);
+    if (!Number.isFinite(raw)) return '';
+    const unit = (s.attributes?.unit_of_measurement as string) ?? 's';
+    let totalSec: number;
+    switch (unit) {
+      case 'd':   totalSec = raw * 86400; break;
+      case 'h':   totalSec = raw * 3600; break;
+      case 'min': totalSec = raw * 60; break;
+      case 's':
+      default:    totalSec = raw; break;
+    }
+    if (totalSec < 60) return `${Math.floor(totalSec)}s`;
+    if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m`;
+    if (totalSec < 86400) {
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    }
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    return h > 0 ? `${d}d ${h}h` : `${d}d`;
   }
 
   // ─── Dialogs ──────────────────────────────────────────────────────
