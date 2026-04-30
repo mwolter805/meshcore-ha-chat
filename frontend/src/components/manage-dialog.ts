@@ -24,6 +24,8 @@ export class ManageDialog extends LitElement {
   @state() private _contacts: Contact[] = [];
   @state() private _channels: Channel[] = [];
   @state() private _searchQuery = '';
+  @state() private _categoryFilter: 'all' | 'added' | 'discovered' = 'all';
+  @state() private _typeFilter: 'all' | 'clients' | 'repeaters' = 'all';
   @state() private _loading = false;
   @state() private _actionInProgress: string | null = null;
   @state() private _confirmingRemoveContact: string | null = null;
@@ -134,6 +136,55 @@ export class ManageDialog extends LitElement {
     .tab-bar button.active {
       color: var(--primary-color, #03a9f4);
       border-bottom-color: var(--primary-color, #03a9f4);
+    }
+
+    /* Filter chips (Contacts tab) */
+    .filter-bar {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px 6px 16px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+      align-items: center;
+    }
+
+    .filter-bar-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--secondary-text-color, #727272);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+
+    .filter-bar-group {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .filter-chip {
+      padding: 4px 10px;
+      border: 1px solid var(--divider-color, #e0e0e0);
+      border-radius: 12px;
+      background: transparent;
+      color: var(--secondary-text-color, #727272);
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+
+    .filter-chip:hover {
+      border-color: var(--primary-color, #03a9f4);
+      color: var(--primary-color, #03a9f4);
+    }
+
+    .filter-chip.active {
+      background: var(--primary-color, #03a9f4);
+      border-color: var(--primary-color, #03a9f4);
+      color: #fff;
     }
 
     /* Search */
@@ -489,6 +540,34 @@ export class ManageDialog extends LitElement {
 
         ${this._activeTab === 'contacts'
           ? html`
+              <div class="filter-bar">
+                <span class="filter-bar-label">Show</span>
+                <div class="filter-bar-group">
+                  ${(['all', 'added', 'discovered'] as const).map(
+                    (c) => html`
+                      <button
+                        class="filter-chip ${this._categoryFilter === c ? 'active' : ''}"
+                        @click=${() => { this._categoryFilter = c; }}
+                      >
+                        ${c === 'all' ? 'All' : c === 'added' ? 'Added' : 'Discovered'}
+                      </button>
+                    `,
+                  )}
+                </div>
+                <span class="filter-bar-label">Type</span>
+                <div class="filter-bar-group">
+                  ${(['all', 'clients', 'repeaters'] as const).map(
+                    (t) => html`
+                      <button
+                        class="filter-chip ${this._typeFilter === t ? 'active' : ''}"
+                        @click=${() => { this._typeFilter = t; }}
+                      >
+                        ${t === 'all' ? 'All' : t === 'clients' ? 'Clients' : 'Repeaters'}
+                      </button>
+                    `,
+                  )}
+                </div>
+              </div>
               <div class="search-bar">
                 <input
                   type="text"
@@ -540,11 +619,15 @@ export class ManageDialog extends LitElement {
     const filtered = this._filterContacts();
 
     if (filtered.length === 0) {
+      const isFiltered =
+        !!this._searchQuery
+        || this._categoryFilter !== 'all'
+        || this._typeFilter !== 'all';
       return html`
         <div class="empty-state">
           <div class="empty-icon"><svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor" opacity="0.5"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg></div>
           <div class="empty-text">
-            ${this._searchQuery ? 'No contacts found' : 'No contacts discovered'}
+            ${isFiltered ? 'No contacts match' : 'No contacts discovered'}
           </div>
         </div>
       `;
@@ -698,6 +781,8 @@ export class ManageDialog extends LitElement {
   private _switchTab(tab: ManageTab) {
     this._activeTab = tab;
     this._searchQuery = '';
+    this._categoryFilter = 'all';
+    this._typeFilter = 'all';
     this._confirmingRemoveContact = null;
     this._confirmingRemoveChannel = null;
   }
@@ -705,13 +790,38 @@ export class ManageDialog extends LitElement {
   // ─── Contact Actions ───────────────────────────────────────────────
 
   private _filterContacts(): Contact[] {
-    if (!this._searchQuery) return this._contacts;
-    const query = this._searchQuery.toLowerCase();
-    return this._contacts.filter(
-      (c) =>
-        (c.adv_name || '').toLowerCase().includes(query) ||
-        (c.pubkey_prefix || '').toLowerCase().includes(query),
-    );
+    let list: Contact[] = this._contacts;
+
+    // Category filter — Added vs Discovered (or All).
+    if (this._categoryFilter === 'added') {
+      list = list.filter((c) => c.added_to_node);
+    } else if (this._categoryFilter === 'discovered') {
+      list = list.filter((c) => !c.added_to_node);
+    }
+
+    // Type filter — clients are emitted by firmware as type 0 OR 1
+    // (firmware-emitted ambiguity, see ws_api.py _compute_type_counts);
+    // repeaters are type 2.
+    if (this._typeFilter === 'clients') {
+      list = list.filter((c) => {
+        const t = c.type ?? 0;
+        return t === 0 || t === 1;
+      });
+    } else if (this._typeFilter === 'repeaters') {
+      list = list.filter((c) => c.type === 2);
+    }
+
+    // Free-text search over name and pubkey prefix.
+    if (this._searchQuery) {
+      const query = this._searchQuery.toLowerCase();
+      list = list.filter(
+        (c) =>
+          (c.adv_name || '').toLowerCase().includes(query) ||
+          (c.pubkey_prefix || '').toLowerCase().includes(query),
+      );
+    }
+
+    return list;
   }
 
   private async _doAddContact(contact: Contact) {

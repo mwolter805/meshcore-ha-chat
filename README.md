@@ -102,6 +102,12 @@ Works as a **companion** to the [core meshcore integration](https://github.com/m
 
 Copy `custom_components/meshcore_chat/` into your HA `config/custom_components/` directory. Restart HA. Add the integration from the UI.
 
+## Usage
+
+For a walkthrough of common tasks (adding contacts, managing channels, issuing commands, tracing paths, changing radio settings) plus operational warnings (radio-reboot requirements, the entity_id rename gotcha), see [INSTRUCTIONS.md](./INSTRUCTIONS.md).
+
+For the technical spec — every file's role, every WebSocket command, the non-obvious code paths — see [as_built.md](./as_built.md).
+
 ## Requirements
 
 - Home Assistant 2024.12 or newer
@@ -111,6 +117,10 @@ Copy `custom_components/meshcore_chat/` into your HA `config/custom_components/`
 
 - [meshcore-dev/meshcore-ha](https://github.com/meshcore-dev/meshcore-ha) — the core integration that drives the MeshCore radio. **Required.**
 - [Ratty7198/MeshCore-HA-UI](https://github.com/Ratty7198/MeshCore-HA-UI) — an alternative companion UI. Great work; this project differs by using a typed/compiled Lit frontend and adding per-conversation persistence, search, and a trace dialog. The two projects use distinct domains, panel URLs, and webcomponent tags so they can coexist on the same HA instance, but installing both produces two sidebar entries — pick one.
+
+## Tips & Troubleshooting
+
+For day-to-day usage and operational notes, see [INSTRUCTIONS.md](./INSTRUCTIONS.md).
 
 ## Development
 
