@@ -170,11 +170,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await async_remove_panel(hass)
             bucket.pop("_panel_registered", None)
             _LOGGER.debug("MeshCore Chat panel removed (last entry unloaded)")
-        # WS commands and UnreadTracker live for the lifetime of the HA
-        # process — there's no public unregister API for either, and re-
-        # registering after a re-add of the integration is guarded above.
-        # We deliberately leave _ws_registered and unread_tracker in
-        # place so a subsequent async_setup_entry doesn't try to re-register.
+        # WS commands live for the lifetime of the HA process — there's
+        # no public unregister API. _ws_registered stays so a subsequent
+        # async_setup_entry doesn't try to re-register and trip HA's
+        # duplicate-registration error.
+        #
+        # UnreadTracker stays as the same instance (its closures may be
+        # referenced by live WS handlers and the bus subscription) but
+        # its in-memory counts are cleared so a re-added entry starts
+        # fresh rather than inheriting stale counts from the previous
+        # entry.
+        tracker = bucket.get("unread_tracker")
+        if tracker is not None:
+            tracker.clear()
 
     return True
 

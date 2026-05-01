@@ -10,6 +10,7 @@ See proposal Change 5 (extended scope per 2026-04-22 user direction).
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -64,6 +65,41 @@ def _get_all_coordinators(hass: HomeAssistant) -> list:
         for entry_id, coord in hass.data[MESHCORE_DOMAIN].items()
         if hasattr(coord, "api")
     ]
+
+
+# Maps Python exception types to WS error codes + user-facing messages.
+# Order matters — first match wins. Add new entries above the catch-all
+# in ``_ws_send_error_safe`` to surface specific failures before they
+# fall through to "error".
+_WS_ERROR_MAP: list[tuple[type[BaseException], str, str]] = [
+    (asyncio.TimeoutError, "timeout", "Operation timed out"),
+    (ConnectionError, "not_connected", "Device not connected"),
+    (vol.Invalid, "invalid", "Invalid request parameters"),
+]
+
+
+def _ws_send_error_safe(
+    connection: websocket_api.ActiveConnection,
+    msg_id: int,
+    ex: Exception,
+    *,
+    handler: str,
+    default_code: str = "error",
+    default_message: str = "Operation failed",
+) -> None:
+    """Log a WS handler exception with context and send a generic error.
+
+    Logs the full traceback at ERROR level for diagnosis. Sends a generic
+    user-facing message to the client — internal exception strings (which
+    may include path info, SDK details, or stack-trace fragments) are
+    deliberately not echoed.
+    """
+    _LOGGER.exception("%s failed: %s", handler, ex)
+    for exc_type, code, message in _WS_ERROR_MAP:
+        if isinstance(ex, exc_type):
+            connection.send_error(msg_id, code, message)
+            return
+    connection.send_error(msg_id, default_code, default_message)
 
 
 # One-shot guard so the legacy-fallback warning fires at most once per
@@ -757,9 +793,8 @@ async def ws_set_device_config(hass, connection, msg):
 
         connection.send_result(msg["id"], {"success": True, "changed": changed})
     except Exception as ex:
-        _LOGGER.error("Error setting device config: %s", ex)
-        connection.send_error(
-            msg["id"], "error", f"Failed to set device config: {str(ex)}"
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_set_device_config"
         )
 
 
@@ -842,11 +877,8 @@ async def ws_execute_local(hass, connection, msg):
             {"response": resp_text, "success": True, "timestamp": timestamp},
         )
     except Exception as ex:
-        _LOGGER.error("Error executing local command %s: %s", command, ex)
-        connection.send_error(
-            msg["id"],
-            "error",
-            f"Failed to execute command {command}: {str(ex)}",
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler=f"ws_execute_local({command!r})"
         )
 
 
@@ -911,11 +943,12 @@ async def ws_execute_remote(hass, connection, msg):
 
         # Send login if password is available
         if password:
-            login_result = await coordinator.api.mesh_core.commands.send_login(
-                contact, password
-            )
-            # Wait a moment for login to be processed
-            await hass.async_add_executor_job(time.sleep, 0.5)
+            await coordinator.api.mesh_core.commands.send_login(contact, password)
+            # Wait a moment for login to be processed before issuing the
+            # command. The 0.5s is empirical, mirroring the upstream
+            # meshcore integration's services.py — replace with an event-
+            # driven wait when the SDK exposes a login-complete signal.
+            await asyncio.sleep(0.5)
 
         # Send the command
         cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
@@ -932,11 +965,11 @@ async def ws_execute_remote(hass, connection, msg):
             {"response": resp_text, "success": True, "timestamp": timestamp},
         )
     except Exception as ex:
-        _LOGGER.error("Error executing remote command on %s: %s", target_prefix, ex)
-        connection.send_error(
+        _ws_send_error_safe(
+            connection,
             msg["id"],
-            "error",
-            f"Failed to execute remote command: {str(ex)}",
+            ex,
+            handler=f"ws_execute_remote({target_prefix!r})",
         )
 
 
@@ -996,11 +1029,11 @@ async def ws_set_channel(hass, connection, msg):
 
         connection.send_result(msg["id"], {"success": True})
     except Exception as ex:
-        _LOGGER.error("Error setting channel %d: %s", channel_idx, ex)
-        connection.send_error(
+        _ws_send_error_safe(
+            connection,
             msg["id"],
-            "error",
-            f"Failed to set channel: {str(ex)}",
+            ex,
+            handler=f"ws_set_channel(idx={channel_idx})",
         )
 
 
@@ -1047,11 +1080,11 @@ async def ws_remove_channel(hass, connection, msg):
 
         connection.send_result(msg["id"], {"success": True})
     except Exception as ex:
-        _LOGGER.error("Error removing channel %d: %s", channel_idx, ex)
-        connection.send_error(
+        _ws_send_error_safe(
+            connection,
             msg["id"],
-            "error",
-            f"Failed to remove channel: {str(ex)}",
+            ex,
+            handler=f"ws_remove_channel(idx={channel_idx})",
         )
 
 
@@ -1169,7 +1202,7 @@ async def ws_remove_neighbor(hass, connection, msg):
         # Send login if password is available
         if password:
             await coordinator.api.mesh_core.commands.send_login(contact, password)
-            await hass.async_add_executor_job(time.sleep, 0.5)
+            await asyncio.sleep(0.5)
 
         # Send neighbor.remove command to the repeater
         cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
@@ -1215,8 +1248,10 @@ async def ws_remove_neighbor(hass, connection, msg):
             sensor_key = f"{target_prefix}:{neighbor_pubkey}"
             coordinator._created_neighbor_sensors.discard(sensor_key)
 
-            # Persist updated data (fire-and-forget, mirrors upstream).
-            hass.async_create_task(coordinator._save_neighbor_data())
+            # Persist updated data — await so that a failure surfaces in
+            # the WS response rather than being silently logged via the
+            # background-task harness.
+            await coordinator._save_neighbor_data()
         except Exception as cleanup_ex:
             _LOGGER.warning(
                 "Inlined remove_single_neighbor cleanup failed for %s/%s: %s",
@@ -1232,14 +1267,14 @@ async def ws_remove_neighbor(hass, connection, msg):
             },
         )
     except Exception as ex:
-        _LOGGER.error(
-            "Error removing neighbor %s from repeater %s: %s",
-            neighbor_pubkey[:6], target_prefix[:6], ex,
-        )
-        connection.send_error(
+        _ws_send_error_safe(
+            connection,
             msg["id"],
-            "error",
-            f"Failed to remove neighbor: {ex}",
+            ex,
+            handler=(
+                f"ws_remove_neighbor(neighbor={neighbor_pubkey[:6]}, "
+                f"repeater={target_prefix[:6]})"
+            ),
         )
 
 
@@ -1278,11 +1313,11 @@ async def ws_cleanup_stale_neighbors(hass, connection, msg):
             },
         )
     except Exception as ex:
-        _LOGGER.error("Error during stale neighbor cleanup: %s", ex)
-        connection.send_error(
+        _ws_send_error_safe(
+            connection,
             msg["id"],
-            "error",
-            f"Failed to cleanup stale neighbors: {ex}",
+            ex,
+            handler="ws_cleanup_stale_neighbors",
         )
 
 
@@ -1349,8 +1384,9 @@ async def ws_regenerate_identity(hass, connection, msg):
             "warning": "All contacts must re-add this device with the new public key.",
         })
     except Exception as ex:
-        _LOGGER.error("Error regenerating identity: %s", ex)
-        connection.send_error(msg["id"], "error", f"Failed: {str(ex)}")
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_regenerate_identity"
+        )
 
 
 @websocket_api.websocket_command(
@@ -1377,8 +1413,9 @@ async def ws_import_identity(hass, connection, msg):
             "pubkey": self_info.get("pubkey", "unknown"),
         })
     except Exception as ex:
-        _LOGGER.error("Error importing identity: %s", ex)
-        connection.send_error(msg["id"], "error", f"Failed: {str(ex)}")
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_import_identity"
+        )
 
 
 # ─── PHASE 4: Location Source ─────────────────────────────────────────────
@@ -1487,8 +1524,9 @@ async def ws_add_contact(hass, connection, msg):
         connection.send_result(msg["id"], {"success": True})
 
     except Exception as ex:
-        _LOGGER.error("Error in ws_add_contact: %s", ex)
-        connection.send_error(msg["id"], "error", str(ex))
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_add_contact"
+        )
 
 
 @websocket_api.websocket_command(
@@ -1561,8 +1599,9 @@ async def ws_remove_contact(hass, connection, msg):
         connection.send_result(msg["id"], {"success": True})
 
     except Exception as ex:
-        _LOGGER.error("Error in ws_remove_contact: %s", ex)
-        connection.send_error(msg["id"], "error", str(ex))
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_remove_contact"
+        )
 
 
 # ─── meshcore/trace ─────────────────────────────────────────────────
@@ -1706,8 +1745,9 @@ async def ws_trace(
             return_response=True,
         )
     except Exception as ex:
-        _LOGGER.error("Error calling meshcore.trace: %s", ex)
-        connection.send_error(msg["id"], "error", str(ex))
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_trace"
+        )
         return
 
     trace = (result or {}).get("trace")
@@ -1756,7 +1796,6 @@ async def _ws_trace_explicit(
     around this by letting the user type the hop sequence manually;
     this branch mirrors that workaround.
     """
-    import asyncio
     import random
 
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
@@ -1875,8 +1914,9 @@ async def _ws_trace_explicit(
             unsub()
 
     except Exception as ex:
-        _LOGGER.error("Error in ws_trace explicit-path: %s", ex)
-        connection.send_error(msg["id"], "error", str(ex))
+        _ws_send_error_safe(
+            connection, msg["id"], ex, handler="ws_trace_explicit"
+        )
 
 
 # ─── meshcore/get_blocked_contacts ──────────────────────────────────

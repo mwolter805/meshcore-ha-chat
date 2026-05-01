@@ -17,7 +17,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run hassfest
-        uses: home-assistant/actions/hassfest@master
+        # Pinned to 2026-04-07 HEAD on home-assistant/actions/master.
+        # Bump on a quarterly cadence to take security and behaviour
+        # fixes; verify with a full validate.yaml run after each bump.
+        uses: home-assistant/actions/hassfest@f6f29a7ee3fa0eccadf3620a7b9ee00ab54ec03b
 
   hacs:
     name: HACS
@@ -27,6 +30,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run HACS validation
-        uses: hacs/action@main
+        # Pinned to 2026-01-26 HEAD on hacs/action/main.
+        # Bump on a quarterly cadence to take security and behaviour
+        # fixes; verify with a full validate.yaml run after each bump.
+        uses: hacs/action@dcb30e72781db3f207d5236b861172774ab0b485
         with:
           category: integration

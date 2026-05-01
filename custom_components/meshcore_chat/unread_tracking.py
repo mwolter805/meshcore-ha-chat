@@ -53,3 +53,14 @@ class UnreadTracker:
     def get_all_unread(self) -> dict[str, int]:
         """Get all unread counts."""
         return {k: v for k, v in self._unread.items() if v > 0}
+
+    def clear(self) -> None:
+        """Clear all unread counts.
+
+        Called from ``async_unload_entry`` on last-entry unload so a
+        subsequent re-add of the integration does not inherit stale
+        counts. The tracker instance itself is preserved (its closures
+        may be referenced by live WS handlers and the bus subscription
+        registered at first setup) — only the in-memory counts reset.
+        """
+        self._unread.clear()
