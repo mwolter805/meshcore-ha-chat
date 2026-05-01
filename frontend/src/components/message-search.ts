@@ -313,7 +313,13 @@ export class MessageSearch extends LitElement {
     if (this._debounceTimer !== null) {
       clearTimeout(this._debounceTimer);
     }
-    if (this._query.trim().length >= 2) {
+    const trimmedLen = this._query.trim().length;
+    const hasMinQuery = trimmedLen >= 2;
+    const isEmpty = trimmedLen === 0;
+    const hasDateFilter = !!(this._fromDate || this._toDate);
+    // Search if (a) query is long enough on its own, or (b) the query box
+    // is empty but at least one date filter is active (date-only search).
+    if (hasMinQuery || (isEmpty && hasDateFilter)) {
       this._debounceTimer = window.setTimeout(() => this._doSearch(), 400);
     } else {
       this._results = [];
@@ -322,24 +328,36 @@ export class MessageSearch extends LitElement {
   }
 
   private async _doSearch() {
-    if (!this.hass || !this._query.trim() || !this.entityId) return;
+    if (!this.hass || !this.entityId) return;
+    const trimmedQuery = this._query.trim();
+    const hasQuery = trimmedQuery.length > 0;
+    const hasDate = !!(this._fromDate || this._toDate);
+    // Need at least one filter — otherwise we'd return every stored message.
+    if (!hasQuery && !hasDate) {
+      this._results = [];
+      this._totalCount = 0;
+      this._hasSearched = false;
+      return;
+    }
     this._searching = true;
     this._hasSearched = true;
 
     try {
       const msg: Record<string, unknown> = {
         type: 'meshcore_chat/search_stored_messages',
-        query: this._query.trim(),
+        query: trimmedQuery,
         entity_id: this.entityId,
         limit: 100,
       };
+      // Date filters: send naive local-time ISO strings (no `Z` suffix) to
+      // match the server's stored format (datetime.now().isoformat()).
+      // Using .toISOString() here would convert to UTC and break the
+      // string comparison on the server side.
       if (this._fromDate) {
-        msg.from_date = new Date(this._fromDate).toISOString();
+        msg.from_date = `${this._fromDate}T00:00:00`;
       }
       if (this._toDate) {
-        const end = new Date(this._toDate);
-        end.setHours(23, 59, 59, 999);
-        msg.to_date = end.toISOString();
+        msg.to_date = `${this._toDate}T23:59:59.999999`;
       }
 
       const result = await this.hass.callWS<{ results: SearchResult[] }>(msg);

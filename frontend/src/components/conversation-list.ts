@@ -9,7 +9,6 @@ type ChatFilter = 'all' | 'unread' | 'dms' | 'channels';
 export class ConversationList extends LitElement {
   @property({ type: Array }) conversations: Array<Contact | Channel> = [];
   @property({ type: String }) activeId: string | null = null;
-  @property({ type: String }) searchQuery = '';
   @property({ type: Object }) unreadCounts: Record<string, number> = {};
 
   @state() private _activeFilter: ChatFilter = 'all';
@@ -61,42 +60,11 @@ export class ConversationList extends LitElement {
       color: var(--primary-text-color);
     }
 
-    .sidebar-search {
-      padding: 12px 12px 8px;
-    }
-
-    .sidebar-search input {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px 12px;
-      border: 1px solid var(--input-border);
-      border-radius: 20px;
-      background: var(--input-bg);
-      color: var(--primary-text-color);
-      font-size: 13px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-
-    .sidebar-search input:focus {
-      border-color: var(--primary-color, #03a9f4);
-    }
-
-    .sidebar-search input::placeholder {
-      color: var(--secondary-text-color, #727272);
-    }
-
     .filter-bar {
       display: flex;
-      padding: 4px 12px 8px;
+      padding: 12px 12px 8px;
       gap: 4px;
       border-bottom: 1px solid var(--divider-color, #e0e0e0);
-      transition: opacity 0.2s;
-    }
-
-    .filter-bar.searching {
-      opacity: 0.5;
-      pointer-events: none;
     }
 
     .filter-btn {
@@ -249,7 +217,6 @@ export class ConversationList extends LitElement {
   updated(changedProperties: Map<string, unknown>) {
     if (
       changedProperties.has('conversations') ||
-      changedProperties.has('searchQuery') ||
       changedProperties.has('_activeFilter')
     ) {
       this._updateFiltered();
@@ -257,8 +224,6 @@ export class ConversationList extends LitElement {
   }
 
   render() {
-    const isSearching = this.searchQuery.length > 0;
-
     return html`
       <div class="sidebar-header">
         <span class="sidebar-title">Chats</span>
@@ -267,21 +232,11 @@ export class ConversationList extends LitElement {
           title="Manage contacts & channels"
           @click=${() => this.dispatchEvent(new CustomEvent('manage-requested', { bubbles: true, composed: true }))}>
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
           </svg>
         </button>
       </div>
-      <div class="sidebar-search">
-        <input
-          type="text"
-          placeholder="Search conversations..."
-          .value=${this.searchQuery}
-          @input=${(e: Event) => {
-            const input = e.target as HTMLInputElement;
-            this.searchQuery = input.value;
-          }} />
-      </div>
-      <div class="filter-bar ${isSearching ? 'searching' : ''}">
+      <div class="filter-bar">
         ${this._renderFilterBtn('all', 'All')}
         ${this._renderFilterBtn('unread', 'Unread')}
         ${this._renderFilterBtn('dms', 'DMs')}
@@ -293,7 +248,7 @@ export class ConversationList extends LitElement {
           : html`
               <div class="empty-state">
                 <div class="empty-text">
-                  ${this._emptyMessage(isSearching)}
+                  ${this._emptyMessage()}
                 </div>
               </div>
             `}
@@ -311,8 +266,7 @@ export class ConversationList extends LitElement {
     `;
   }
 
-  private _emptyMessage(isSearching: boolean): string {
-    if (isSearching) return 'No conversations found';
+  private _emptyMessage(): string {
     switch (this._activeFilter) {
       case 'unread': return 'No unread conversations';
       case 'dms': return 'No direct messages';
@@ -370,18 +324,6 @@ export class ConversationList extends LitElement {
   }
 
   private _updateFiltered() {
-    const query = this.searchQuery.toLowerCase();
-
-    // When searching, ignore the filter and search everything (matches MeshCoreOne behavior)
-    if (query) {
-      this._filteredConversations = this.conversations.filter((conv) => {
-        const isContact = 'pubkey_prefix' in conv;
-        const name = isContact ? (conv as Contact).adv_name : (conv as Channel).name;
-        return name.toLowerCase().includes(query);
-      });
-      return;
-    }
-
     // Apply category filter
     switch (this._activeFilter) {
       case 'all':
