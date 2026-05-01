@@ -4,6 +4,14 @@ __pycache__/
 *$py.class
 *.egg-info/
 .pytest_cache/
+pytest-cache-files-*/
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
 
 # Node / frontend build cache
 node_modules/

@@ -22,6 +22,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 
+from . import MeshCoreChatRuntimeData
 from .const import DOMAIN, MESHCORE_DOMAIN, ENTITY_DOMAIN_BINARY_SENSOR
 from .message_store import MessageStore
 from .utils import format_entity_id, sanitize_name
@@ -173,26 +174,22 @@ def _get_store(
 ) -> MessageStore | None:
     """Return the companion's per-entry MessageStore.
 
-    The companion's message store is owned by *this* integration, not the
-    upstream meshcore one — so it lives in ``hass.data[DOMAIN][entry_id]``.
-    Note ``entry_id`` here is the *companion's* config-entry id (typically
-    a singleton per HA instance because the panel is installed once).
-    Falls back to the first registered companion entry when ``entry_id``
-    is omitted.
+    Per-entry state lives on ``entry.runtime_data`` (Bronze convention,
+    post-2024.6). ``entry_id`` here is the *companion's* config-entry id
+    (typically a singleton per HA instance because the panel is installed
+    once). When omitted, falls back to the first companion config entry
+    that has a runtime_data store.
     """
-    bucket = hass.data.get(DOMAIN)
-    if not bucket:
+    if entry_id:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry and isinstance(entry.runtime_data, MeshCoreChatRuntimeData):
+            return entry.runtime_data.store
         return None
 
-    if entry_id and entry_id in bucket:
-        store = bucket[entry_id].get("store") if isinstance(bucket[entry_id], dict) else None
-        return store if isinstance(store, MessageStore) else None
-
-    # Fallback: first available entry with a store.
-    for value in bucket.values():
-        store = value.get("store") if isinstance(value, dict) else None
-        if isinstance(store, MessageStore):
-            return store
+    # Fallback: first companion entry with a store.
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if isinstance(entry.runtime_data, MeshCoreChatRuntimeData):
+            return entry.runtime_data.store
     return None
 
 

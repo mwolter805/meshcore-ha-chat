@@ -238,6 +238,15 @@ Hidden-sensor preferences are per-device and stored in panel-local state — the
 
 ---
 
+## Known limitations
+
+- **Radio settings only take effect after a companion reboot.** Frequency, bandwidth, spreading factor, coding rate, TX power — change in Settings → Configure, save, then reboot the companion. The change is queued; the radio re-initialises on next boot.
+- **Renaming the companion changes its entity_ids.** See [Renaming the companion changes its entity_ids in HA](#renaming-the-companion-changes-its-entity_ids-in-ha) above. Plan automation references accordingly.
+- **No backend Python tests yet.** The integration is field-tested but not unit-tested. Issues are caught in production rather than CI. Track via the [GitHub issue tracker](https://github.com/mwolter805/meshcore-ha-chat/issues).
+- **No reauthentication or device discovery.** The companion has no auth and no automatic discovery — meshcore (the upstream integration) handles all device pairing.
+
+---
+
 ## See also
 
 - [meshcore-dev/meshcore-ha](https://github.com/meshcore-dev/meshcore-ha) — the upstream integration that drives the radio. **Required.** All radio operations (sending messages, querying device info, configuring radio parameters, managing repeaters) ultimately go through it; this companion only renders and persists.

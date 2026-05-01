@@ -120,6 +120,32 @@ For a walkthrough of common tasks (adding contacts, managing channels, issuing c
 - [meshcore-dev/meshcore-ha](https://github.com/meshcore-dev/meshcore-ha) — the core integration that drives the MeshCore radio. **Required.**  
   [![Open meshcore-ha in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=meshcore-dev&repository=meshcore-ha&category=integration)
 
+## Use cases
+
+- **Off-grid mesh chat panel.** Run a tablet in your kitchen showing the MeshCore Chat sidebar; talk to local mesh peers without leaving Home Assistant.
+- **Search recent traffic.** "Who pinged the @[Repeater Cliff] node yesterday?" — date-range message search across all conversations.
+- **Path diagnostics.** Trace the route a message took (hops, SNR, RSSI per repeater) right from the message bubble.
+- **Managed-device dashboard.** Monitor battery, last-heard, neighbour SNR, and uptime on every repeater you've added — one card per device.
+
+## Known limitations
+
+- **Requires meshcore ≥ 2.6.0.** Older versions fall back to direct coordinator reads where supported, but Trace and Get Contacts use upstream services that landed in 2.6.0.
+- **Message archive is not a long-term log.** Default retention is 90 days, capped at 500 messages per conversation. Configurable via Settings → MeshCore Chat → Configure (range 1–365 days, 50–5000 messages).
+- **Path-discovery traces don't always return.** Multi-hop flood discovery sometimes silently drops; if a normal trace fails, use the explicit-path option in the trace dialog and supply the comma-hex hop sequence manually.
+- **Channel keys are stored in the clear in HA's `.storage`.** Backups encrypt at rest if HA's backup encryption is enabled; otherwise channel keys are recoverable from a stolen backup.
+
+## Removal
+
+To uninstall:
+
+1. Settings → Devices & Services → MeshCore Chat → ⋮ → Delete.
+2. Optional: remove the message archive from disk:
+   ```bash
+   rm /config/.storage/meshcore_chat.*
+   ```
+   The archive is per-entry; deleting the config entry does not remove these files automatically (HA's standard behaviour). Skip this step if you intend to re-add the integration later — the archive will be re-attached.
+3. If you also want to uninstall the underlying meshcore integration: Settings → Devices & Services → MeshCore → Delete, then remove `custom_components/meshcore` (HACS or manual).
+
 ## Tips & Troubleshooting
 
 The integration should be fairly easy to understand and navigate, for instructions on dialog pop-ups and operational gotchas worth knowing, see [INSTRUCTIONS.md](./INSTRUCTIONS.md).

@@ -1,0 +1,27 @@
+# Test-only configuration. The integration itself is distributed via
+# HACS (no Python packaging) — this file exists to wire pytest, asyncio
+# mode, and coverage scope. There is no [build-system] section because
+# the integration is not a Python package.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Mirror Home Assistant Core's default for custom-integration tests:
+# fail any test that takes longer than 30s without progress.
+timeout = 30
+
+[tool.coverage.run]
+source = ["custom_components/meshcore_chat"]
+omit = [
+    # Frontend-bundled assets and tests themselves are out of scope.
+    "tests/*",
+]
+
+[tool.coverage.report]
+# Don't complain about missing coverage on defensive try/except blocks
+# that are guarded with ``# pragma: no cover``.
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

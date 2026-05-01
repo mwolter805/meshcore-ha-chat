@@ -1,0 +1,190 @@
+# Quality scale tracker for meshcore-ha-chat.
+# This integration ships via HACS only and is not currently seeking
+# Home Assistant core inclusion. The file documents progress against
+# HA's published Integration Quality Scale rules
+# (https://developers.home-assistant.io/docs/core/integration-quality-scale/checklist)
+# so future contributors have a clear "what's done, what's exempt, what's
+# pending" view.
+
+rules:
+  # ─── Bronze ──────────────────────────────────────────────────────────
+  action-setup:
+    status: exempt
+    comment: Integration registers no service actions; uses WebSocket commands instead.
+  appropriate-polling:
+    status: exempt
+    comment: Event-driven (consumes meshcore_message events from upstream); no polling.
+  brands:
+    status: done
+    comment: brand/icon.png and brand/icon@2x.png present.
+  common-modules:
+    status: done
+    comment: utils.py and unread_tracking.py provide cross-handler shared helpers.
+  config-flow-test-coverage:
+    status: todo
+    comment: Tracked as Q04 in the HA Quality forensics report; backend test scaffolding is multi-session work.
+  config-flow:
+    status: done
+    comment: |
+      Single-step user flow with two preconditions (meshcore installed,
+      single instance). OptionsFlow exposes retention tunables.
+      data_description present in strings.json/translations/en.json.
+  dependency-transparency:
+    status: done
+    comment: |
+      manifest.json declares all dependencies; README's Requirements
+      section documents the meshcore>=2.6.0 floor.
+  docs-actions:
+    status: exempt
+    comment: No service actions registered.
+  docs-high-level-description:
+    status: done
+    comment: README opens with one-paragraph integration description.
+  docs-installation-instructions:
+    status: done
+    comment: README has Installation section with both HACS and manual paths.
+  docs-removal-instructions:
+    status: todo
+    comment: Tracked as Q09 in the HA Quality forensics report; will land in Phase 3.
+  entity-event-setup:
+    status: exempt
+    comment: Integration creates no entities.
+  entity-unique-id:
+    status: exempt
+    comment: Integration creates no entities.
+  has-entity-name:
+    status: exempt
+    comment: Integration creates no entities.
+  runtime-data:
+    status: todo
+    comment: Tracked as Q01 in the HA Quality forensics report; will land in Phase 2.
+  test-before-configure:
+    status: exempt
+    comment: Single-step flow; nothing to "test" pre-configure.
+  test-before-setup:
+    status: done
+    comment: |
+      ConfigEntryNotReady raised in async_setup_entry when upstream
+      meshcore has no coordinators yet (Phase 1 of HA Quality
+      Remediation, 2026-05-01).
+  unique-config-entry:
+    status: done
+    comment: |
+      config_flow.py async_step_user aborts with single_instance_allowed
+      if a meshcore_chat entry already exists.
+
+  # ─── Silver ──────────────────────────────────────────────────────────
+  action-exceptions:
+    status: exempt
+    comment: No service actions.
+  config-entry-unloading:
+    status: done
+    comment: async_unload_entry implemented; per-entry teardown clean.
+  docs-configuration-parameters:
+    status: todo
+    comment: Tracked as Q09 in the HA Quality forensics report.
+  docs-installation-parameters:
+    status: done
+    comment: Single-step config flow; INSTRUCTIONS.md covers what little there is.
+  entity-unavailable:
+    status: exempt
+    comment: No entities.
+  integration-owner:
+    status: done
+    comment: codeowners ["@mwolter805"] in manifest.json.
+  log-when-unavailable:
+    status: partial
+    comment: |
+      ConfigEntryNotReady covers the unavailable-coordinator case at setup
+      time. Runtime "upstream went away mid-life" detection is not
+      implemented; tracked as Q08 in the HA Quality forensics report
+      (repair-issues), landing in Phase 3.
+  parallel-updates:
+    status: exempt
+    comment: No platforms.
+  reauthentication-flow:
+    status: exempt
+    comment: No authentication.
+  test-coverage:
+    status: todo
+    comment: Tracked as Q04 in the HA Quality forensics report.
+
+  # ─── Gold ────────────────────────────────────────────────────────────
+  devices:
+    status: exempt
+    comment: Integration creates no devices; consumes upstream's.
+  diagnostics:
+    status: todo
+    comment: Tracked as Q06 in the HA Quality forensics report; will land in Phase 3.
+  discovery-update-info:
+    status: exempt
+    comment: No discovery surface.
+  discovery:
+    status: exempt
+    comment: No discovery (meshcore upstream owns radio discovery).
+  docs-data-update:
+    status: todo
+    comment: Tracked as Q09; will land in Phase 3.
+  docs-examples:
+    status: todo
+    comment: Tracked as Q09; will land in Phase 3 if appetite.
+  docs-known-limitations:
+    status: todo
+    comment: Tracked as Q09; will land in Phase 3.
+  docs-supported-devices:
+    status: exempt
+    comment: Integration is hardware-agnostic (whatever upstream meshcore supports).
+  docs-supported-functions:
+    status: partial
+    comment: README Features section is high-level. INSTRUCTIONS.md covers the per-tab functionality. Could be more rigorous.
+  docs-troubleshooting:
+    status: partial
+    comment: README Tips & Troubleshooting section exists; could be expanded.
+  docs-use-cases:
+    status: todo
+    comment: Tracked as Q09; will land in Phase 3.
+  dynamic-devices:
+    status: exempt
+    comment: No devices.
+  entity-category:
+    status: exempt
+    comment: No entities.
+  entity-device-class:
+    status: exempt
+    comment: No entities.
+  entity-disabled-by-default:
+    status: exempt
+    comment: No entities.
+  entity-translations:
+    status: exempt
+    comment: No entities.
+  exception-translations:
+    status: todo
+    comment: Tracked as Q10 in the HA Quality forensics report; will land in Phase 6.
+  icon-translations:
+    status: exempt
+    comment: No entities.
+  reconfiguration-flow:
+    status: partial
+    comment: OptionsFlow handles runtime tunables. No separate reconfigure flow because there's nothing to reconfigure beyond the retention options.
+  repair-issues:
+    status: todo
+    comment: Tracked as Q08; will land in Phase 3.
+  stale-devices:
+    status: exempt
+    comment: No devices.
+
+  # ─── Platinum ────────────────────────────────────────────────────────
+  async-dependency:
+    status: exempt
+    comment: No external Python dependencies (manifest requirements is empty).
+  inject-websession:
+    status: exempt
+    comment: No external Python dependencies; no HTTP client to inject websession into.
+  strict-typing:
+    status: todo
+    comment: |
+      Integration uses type hints + `from __future__ import annotations`
+      consistently, but no `mypy --strict` configuration. Possible v0.2+
+      target; not currently tracked as a Q-finding because the gap is
+      hygienic rather than user-visible.

@@ -1,0 +1,12 @@
+# Pinned test dependencies for meshcore-ha-chat (Phase 4 of HA Quality
+# Remediation). Install into a Python 3.13+ virtualenv:
+#
+#   uv venv --python 3.13 .venv
+#   uv pip install -r requirements_test.txt
+#   .venv/bin/python -m pytest tests/ -v
+#
+# pytest-homeassistant-custom-component pulls Home Assistant core as a
+# transitive dep, so this single line gets the entire HA test surface
+# (hass fixture, MockConfigEntry, registry fakes, etc.).
+
+pytest-homeassistant-custom-component

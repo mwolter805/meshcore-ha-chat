@@ -21,8 +21,21 @@
           "message_retention_days": "Message retention (days)"
         },
         "data_description": {
-          "max_messages_per_conversation": "When a conversation exceeds this number, the oldest messages are trimmed first. Range: 50 \u2013 5000. Default: 500.",
-          "message_retention_days": "Messages older than this are pruned at startup and during periodic cleanup. Range: 1 \u2013 365. Default: 90."
+          "max_messages_per_conversation": "When a conversation exceeds this number, the oldest messages are trimmed first. Range: 50 – 5000. Default: 500.",
+          "message_retention_days": "Messages older than this are pruned at startup and during periodic cleanup. Range: 1 – 365. Default: 90."
+        }
+      }
+    }
+  },
+  "issues": {
+    "upstream_meshcore_unavailable": {
+      "title": "MeshCore integration is not configured",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "MeshCore Chat needs the MeshCore integration",
+            "description": "MeshCore Chat is a companion to the core meshcore integration, but no MeshCore device is currently configured. Install and configure the meshcore integration first (Settings → Devices & Services → Add Integration → MeshCore), or remove MeshCore Chat if you no longer need it.\n\nClick Submit to acknowledge this issue. It will clear automatically once a MeshCore device is configured."
+          }
         }
       }
     }
