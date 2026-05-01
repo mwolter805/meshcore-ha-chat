@@ -1,6 +1,5 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import type { ChatMessage, MessageGroup, DeliveryStatus } from '../types';
 import { formatTimestamp } from '../chat/message-parser';
 
@@ -347,22 +346,33 @@ export class MessageBubble extends LitElement {
   }
 
   private _renderTextWithMentions(text: string, mentions: string[]) {
-    let rendered = text;
-    const mentionSet = new Set(mentions);
-
-    // Replace @[Name] mentions
-    for (const mention of mentionSet) {
-      const pattern = new RegExp(`@\\[${mention}\\]`, 'g');
-      rendered = rendered.replace(pattern, `<span class="mention">@${mention}</span>`);
+    if (mentions.length === 0) {
+      // No mentions to highlight — return raw text. Lit auto-escapes
+      // string interpolations in html`...` templates.
+      return text;
     }
 
-    // Replace @Word mentions
-    for (const mention of mentionSet) {
-      const pattern = new RegExp(`@${mention}\\b`, 'g');
-      rendered = rendered.replace(pattern, `<span class="mention">@${mention}</span>`);
-    }
+    // Build a single regex matching either @[Name] or @Name forms for any
+    // known mention. Escape regex special chars in mention names so a name
+    // containing parentheses or other regex metacharacters can't break the
+    // pattern or inject capture groups.
+    const escaped = mentions.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const pattern = new RegExp(
+      `@\\[(${escaped.join('|')})\\]|@(${escaped.join('|')})\\b`,
+      'g',
+    );
 
-    return unsafeHTML(rendered);
+    const parts: (string | ReturnType<typeof html>)[] = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(text)) !== null) {
+      if (m.index > last) parts.push(text.slice(last, m.index));
+      const name = m[1] ?? m[2];
+      parts.push(html`<span class="mention">@${name}</span>`);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) parts.push(text.slice(last));
+    return parts;
   }
 
   private _renderMessageDialog(msg: ChatMessage) {

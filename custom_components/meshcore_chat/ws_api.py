@@ -423,6 +423,7 @@ async def ws_get_node_counts(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_clear_discovered_contacts(
     hass: HomeAssistant,
@@ -695,6 +696,7 @@ def ws_get_device_config(hass, connection, msg):
         vol.Required("settings"): dict,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_set_device_config(hass, connection, msg):
     """Set companion device config."""
@@ -795,6 +797,7 @@ def _format_event_response(result) -> str:
         vol.Optional("args"): dict,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_execute_local(hass, connection, msg):
     """Execute a local mesh_core command."""
@@ -805,6 +808,18 @@ async def ws_execute_local(hass, connection, msg):
 
     command = msg.get("command")
     args = msg.get("args", {})
+
+    # Defense-in-depth against dunder-method invocation via getattr. The
+    # frontend's commands/local-commands.ts catalogue is an *implicit*
+    # allowlist; the WS surface itself accepts any method name. Without
+    # this guard, an admin (or a future non-admin if require_admin is
+    # ever loosened) could invoke methods like __init__ or any future
+    # _internal_* SDK helper that becomes reachable through getattr.
+    if not command or command.startswith("_"):
+        connection.send_error(
+            msg["id"], "invalid", f"Invalid command name: {command!r}"
+        )
+        return
 
     try:
         # Get the command method from mesh_core.commands
@@ -847,6 +862,7 @@ async def ws_execute_local(hass, connection, msg):
         vol.Required("command"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_execute_remote(hass, connection, msg):
     """Execute a remote command on a managed device."""
@@ -937,6 +953,7 @@ async def ws_execute_remote(hass, connection, msg):
         vol.Optional("key"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_set_channel(hass, connection, msg):
     """Set or update a channel."""
@@ -998,6 +1015,7 @@ async def ws_set_channel(hass, connection, msg):
         vol.Required("channel_idx"): int,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_remove_channel(hass, connection, msg):
     """Remove a channel."""
@@ -1107,6 +1125,7 @@ def ws_get_neighbors(hass, connection, msg):
         vol.Required("neighbor_pubkey"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_remove_neighbor(hass, connection, msg):
     """Remove a neighbor from a repeater and clean up HA entities."""
@@ -1235,6 +1254,7 @@ async def ws_remove_neighbor(hass, connection, msg):
         ),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_cleanup_stale_neighbors(hass, connection, msg):
     """Manually trigger cleanup of stale neighbor entries."""
@@ -1310,6 +1330,7 @@ async def ws_mark_read(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_regenerate_identity(hass, connection, msg):
     """Regenerate device identity (new public key)."""
@@ -1339,6 +1360,7 @@ async def ws_regenerate_identity(hass, connection, msg):
         vol.Required("private_key"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_import_identity(hass, connection, msg):
     """Import a private key to restore identity."""
@@ -1369,6 +1391,7 @@ async def ws_import_identity(hass, connection, msg):
         vol.Required("source"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_set_location_source(hass, connection, msg):
     """Set the location source for the device."""
@@ -1398,6 +1421,7 @@ async def ws_set_location_source(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_add_contact(hass, connection, msg):
     """Add a discovered contact to the node's contact list."""
@@ -1474,6 +1498,7 @@ async def ws_add_contact(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_remove_contact(hass, connection, msg):
     """Remove a contact from the node's contact list."""
@@ -1631,6 +1656,7 @@ def _trace_error_for(
         vol.Optional("path"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_trace(
     hass: HomeAssistant,
@@ -1901,6 +1927,7 @@ def ws_get_blocked_contacts(
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @callback
 def ws_set_contact_blocked(
     hass: HomeAssistant,
