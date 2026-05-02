@@ -440,7 +440,7 @@ export class ChatPage extends LitElement {
                 <button class="back-button" @click=${() => (this._narrowShowMessages = false)}>← Back</button>
                 <span class="narrow-conv-name">${this._getConversationName()}</span>
                 <div class="chat-header-actions">
-                  <button class="header-action-btn" title="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
+                  <button class="header-action-btn" title="Search messages" aria-label="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
                 </div>
               </div>
               ${this._renderChatArea()}
@@ -504,7 +504,7 @@ export class ChatPage extends LitElement {
                 ${this._getConversationName()}
               </div>
               <div class="chat-header-actions">
-                <button class="header-action-btn" title="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
+                <button class="header-action-btn" title="Search messages" aria-label="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
               </div>
             </div>
           ` : ''}
@@ -518,6 +518,7 @@ export class ChatPage extends LitElement {
               .entityId=${this._currentEntityId || undefined}
               .meshNodeName=${this.config?.node_name}
               @result-selected=${this._onSearchResultSelected}
+              @search-close=${() => { this._searchOpen = false; }}
             ></meshcore-message-search>
           </div>
         ` : ''}
@@ -598,6 +599,7 @@ export class ChatPage extends LitElement {
       <div class="input-area">
         <textarea
           placeholder="Type a message..."
+          aria-label="Message text. Press Enter to send, Shift+Enter for newline."
           .value=${this._inputText}
           @input=${(e: Event) => {
             const ta = e.target as HTMLTextAreaElement;
@@ -612,6 +614,7 @@ export class ChatPage extends LitElement {
           ?disabled=${this._sending || !this.selectedId}></textarea>
         <button
           class="send-button"
+          aria-label="Send message"
           @click=${() => this._sendMessage()}
           ?disabled=${this._sending || !this.selectedId || !this._inputText.trim()}>
           <svg viewBox="0 0 24 24" fill="currentColor">

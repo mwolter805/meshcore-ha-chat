@@ -4,6 +4,7 @@ import type { TraceResult } from '../api';
 import type { TracePathMode } from '../api';
 import type { Contact } from '../types';
 import { panelStyles } from '../styles';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Modal dialog for tracing a contact.
@@ -52,6 +53,15 @@ export class TraceDialog extends LitElement {
    * distinguish via the explicit _running flag set by _onRunTrace.
    */
   @state() private _running = false;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog.
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._close(),
+    });
+  }
 
   static styles = [
     panelStyles,
@@ -459,10 +469,15 @@ export class TraceDialog extends LitElement {
 
     return html`
       <div class="dialog-backdrop" @click=${this._close}>
-        <div class="dialog" @click=${(e: Event) => e.stopPropagation()}>
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Trace ${this.contactName}"
+          @click=${(e: Event) => e.stopPropagation()}>
           <div class="dialog-header">
             <div class="dialog-title">Trace ${this.contactName}</div>
-            <button class="dialog-close" @click=${this._close}>✕</button>
+            <button class="dialog-close" aria-label="Close" @click=${this._close}>✕</button>
           </div>
           <div class="dialog-content">
             ${this._renderBody()}

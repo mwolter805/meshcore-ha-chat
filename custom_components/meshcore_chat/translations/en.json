@@ -39,5 +39,22 @@
         }
       }
     }
+  },
+  "exceptions": {
+    "operation_failed": {
+      "message": "Operation failed"
+    },
+    "device_not_connected": {
+      "message": "Device not connected"
+    },
+    "operation_timed_out": {
+      "message": "Operation timed out"
+    },
+    "invalid_request": {
+      "message": "Invalid request parameters"
+    },
+    "no_meshcore_coordinator": {
+      "message": "No active MeshCore coordinator"
+    }
   }
 }

@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant, Contact, Channel } from '../types';
 import { getContacts, getChannels, getDeviceConfig, addContact, removeContact, removeChannel } from '../api';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 import './channel-dialog';
 
 type ManageTab = 'contacts' | 'channels';
@@ -19,6 +20,17 @@ export class ManageDialog extends LitElement {
   @property({ type: Object }) hass?: HomeAssistant;
   @property({ type: String }) entryId?: string;
   @property({ type: Boolean }) narrow = false;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog. The host
+    // always renders an open dialog (no `open` flag — chat-page
+    // conditionally mounts/unmounts), so isOpen is constant true.
+    attachDialogA11y(this, {
+      isOpen: () => true,
+      onEscape: () => this._close(),
+    });
+  }
 
   @state() private _activeTab: ManageTab = 'contacts';
   @state() private _contacts: Contact[] = [];
@@ -519,10 +531,15 @@ export class ManageDialog extends LitElement {
 
   render() {
     return html`
-      <div class="dialog" @click=${(e: Event) => e.stopPropagation()}>
+      <div
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage contacts and channels"
+        @click=${(e: Event) => e.stopPropagation()}>
         <div class="dialog-header">
           <span class="dialog-title">Manage</span>
-          <button class="close-btn" @click=${this._close}>✕</button>
+          <button class="close-btn" aria-label="Close" @click=${this._close}>✕</button>
         </div>
 
         <div class="tab-bar">
@@ -571,13 +588,11 @@ export class ManageDialog extends LitElement {
               <div class="search-bar">
                 <input
                   type="text"
+                  aria-label="Search contacts"
                   placeholder="Search contacts..."
                   .value=${this._searchQuery}
                   @input=${(e: Event) => {
                     this._searchQuery = (e.target as HTMLInputElement).value;
-                  }}
-                  @keydown=${(e: KeyboardEvent) => {
-                    if (e.key === 'Escape') this._close();
                   }}
                 />
               </div>

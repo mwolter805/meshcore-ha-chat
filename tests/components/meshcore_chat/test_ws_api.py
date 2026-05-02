@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.meshcore_chat import (
@@ -1288,3 +1289,136 @@ async def test_ws_search_stored_messages_error_no_store(
         {"id": 1, "query": "x", "limit": 20},
     )
     assert conn.errors[0][1] == "not_found"
+
+
+# ─── Runtime upstream-removal repair-issue sync ─────────────────────────
+#
+# Phase 1 of the runtime-removal-detection proposal hooks
+# `_sync_upstream_repair_issue` into the WS coordinator-discovery path.
+# These tests cover the user-visible flow: upstream present → no issue;
+# upstream removed mid-session → issue surfaces on next WS hit; upstream
+# restored → issue auto-clears on next WS hit. Plus the idempotency
+# loop that backs Risk 1 in the proposal.
+
+
+def _has_upstream_repair_issue(hass: HomeAssistant) -> bool:
+    """True iff the upstream_meshcore_unavailable issue is registered."""
+    return (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, "upstream_meshcore_unavailable"
+        )
+        is not None
+    )
+
+
+async def test_ws_get_devices_runtime_removal_creates_repair_issue(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Upstream present → ws_get_devices clean; remove → next call surfaces issue.
+
+    Mirrors the observable bug: the user removes the upstream meshcore
+    config entry while meshcore_chat is still loaded; the chat panel's
+    next backend hit should publish the repair issue rather than
+    silently degrade.
+    """
+    # Phase 1 — upstream present, normal traffic. No repair issue.
+    conn1 = _Connection()
+    await _call_ws(ws_api.ws_get_devices, hass, conn1, {"id": 1})
+    assert conn1.results
+    assert conn1.results[0][1]["devices"][0]["entry_id"] == "meshcore_entry"
+    assert not _has_upstream_repair_issue(hass)
+
+    # Phase 2 — upstream removed at runtime (config-entry delete simulation).
+    # Pop the bucket entirely; this matches what upstream's unload does
+    # in practice (drops the per-entry coordinator, leaves no bucket if
+    # it was the only entry).
+    hass.data.pop(MESHCORE_DOMAIN, None)
+
+    conn2 = _Connection()
+    await _call_ws(ws_api.ws_get_devices, hass, conn2, {"id": 2})
+    # Empty result + repair issue surfaced.
+    assert conn2.results == [(2, {"devices": []})]
+    assert _has_upstream_repair_issue(hass)
+
+    # Phase 3 — upstream restored (re-add the coordinator). Next WS hit
+    # auto-clears the repair issue.
+    hass.data[MESHCORE_DOMAIN] = {"meshcore_entry": coordinator}
+
+    conn3 = _Connection()
+    await _call_ws(ws_api.ws_get_devices, hass, conn3, {"id": 3})
+    assert conn3.results
+    assert conn3.results[0][1]["devices"][0]["entry_id"] == "meshcore_entry"
+    assert not _has_upstream_repair_issue(hass)
+
+
+def test_get_coordinator_creates_repair_issue_when_upstream_absent(
+    hass: HomeAssistant,
+) -> None:
+    """Direct helper call with no upstream → returns None, raises issue."""
+    hass.data.pop(MESHCORE_DOMAIN, None)
+    assert ws_api._get_coordinator(hass) is None
+    assert _has_upstream_repair_issue(hass)
+
+
+def test_get_coordinator_clears_repair_issue_when_upstream_returns(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Pre-existing issue + upstream present → helper call clears it."""
+    # Seed the issue.
+    ir.async_create_issue(
+        hass, DOMAIN, "upstream_meshcore_unavailable",
+        is_fixable=True,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="upstream_meshcore_unavailable",
+    )
+    assert _has_upstream_repair_issue(hass)
+    # Helper call with upstream present clears it.
+    assert ws_api._get_coordinator(hass) is coordinator
+    assert not _has_upstream_repair_issue(hass)
+
+
+def test_get_all_coordinators_creates_repair_issue_when_upstream_absent(
+    hass: HomeAssistant,
+) -> None:
+    """Direct helper call with no upstream → empty list, raises issue."""
+    hass.data.pop(MESHCORE_DOMAIN, None)
+    assert ws_api._get_all_coordinators(hass) == []
+    assert _has_upstream_repair_issue(hass)
+
+
+def test_get_all_coordinators_clears_repair_issue_when_upstream_returns(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Pre-existing issue + upstream present → helper call clears it."""
+    ir.async_create_issue(
+        hass, DOMAIN, "upstream_meshcore_unavailable",
+        is_fixable=True,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="upstream_meshcore_unavailable",
+    )
+    assert _has_upstream_repair_issue(hass)
+    assert len(ws_api._get_all_coordinators(hass)) == 1
+    assert not _has_upstream_repair_issue(hass)
+
+
+def test_get_coordinator_idempotent_under_panel_polling(
+    hass: HomeAssistant,
+) -> None:
+    """Risk 1: 50× helper calls with upstream absent → exactly 1 issue.
+
+    The chat panel typically fires get_devices + get_contacts +
+    get_channels on every load; if the user is reloading aggressively,
+    the helpers fire dozens of times per minute. HA's issue registry
+    dedupes by (domain, issue_id), so we end up with exactly one entry.
+    """
+    hass.data.pop(MESHCORE_DOMAIN, None)
+    for _ in range(50):
+        ws_api._get_coordinator(hass)
+        ws_api._get_all_coordinators(hass)
+    registry = ir.async_get(hass)
+    matching = [
+        i for i in registry.issues.values()
+        if i.domain == DOMAIN
+        and i.issue_id == "upstream_meshcore_unavailable"
+    ]
+    assert len(matching) == 1

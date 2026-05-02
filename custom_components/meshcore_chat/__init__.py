@@ -67,9 +67,59 @@ class MeshCoreChatRuntimeData:
 type MeshCoreChatConfigEntry = ConfigEntry[MeshCoreChatRuntimeData]
 
 
-# NOTE: ws_api.py imports ``MeshCoreChatRuntimeData`` from this module.
-# Keep this import below the dataclass definition so the symbol exists on
-# the partially-initialized package when ws_api.py executes its top-level
+# ─── Upstream-presence helpers ───────────────────────────────────────────
+#
+# ``_upstream_meshcore_present`` and ``_sync_upstream_repair_issue`` are
+# the canonical readiness/repair surface for the upstream ``meshcore``
+# integration. They are intentionally module-level (not nested inside
+# ``async_setup_entry``) so that ``ws_api.py`` can back-import
+# ``_sync_upstream_repair_issue`` and drive the repair issue from the
+# WS-command path (i.e. reactively whenever the chat panel discovers
+# upstream is missing or has returned at runtime, not just at HA boot).
+#
+# The helpers MUST be defined above the ``from .ws_api import ...`` line
+# below so the symbol exists on the partially-initialized package when
+# ``ws_api.py`` executes its top-level imports during package load.
+
+
+def _upstream_meshcore_present(hass: HomeAssistant) -> bool:
+    """Return True if the upstream meshcore integration has at least one coordinator.
+
+    The companion uses ``hass.data[MESHCORE_DOMAIN]`` as the readiness
+    signal — upstream populates that dict on a successful coordinator
+    init. Empty dict counts as "not present" (covers the removed-at-
+    runtime case where upstream cleaned up its key on unload, as well
+    as the never-configured case).
+    """
+    return bool(hass.data.get(MESHCORE_DOMAIN))
+
+
+@callback
+def _sync_upstream_repair_issue(hass: HomeAssistant) -> None:
+    """Create or delete the upstream_meshcore_unavailable repair issue based on state.
+
+    Idempotent — HA dedupes by (domain, issue_id), and async_delete_issue
+    on a non-existent issue is a no-op. Safe to call from any code path
+    that has just observed the upstream's presence/absence (setup-time
+    block in ``async_setup_entry``, WS-command discovery in ``ws_api``).
+    """
+    if _upstream_meshcore_present(hass):
+        ir.async_delete_issue(hass, DOMAIN, "upstream_meshcore_unavailable")
+    else:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "upstream_meshcore_unavailable",
+            is_fixable=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="upstream_meshcore_unavailable",
+        )
+
+
+# NOTE: ws_api.py imports ``MeshCoreChatRuntimeData`` and
+# ``_sync_upstream_repair_issue`` from this module. Keep this import
+# below the dataclass + helper definitions so the symbols exist on the
+# partially-initialized package when ws_api.py executes its top-level
 # imports during package load. The deliberate-ordering noqa silences the
 # E402 module-level-import-not-at-top warning.
 from .ws_api import async_register_ws_commands  # noqa: E402
@@ -89,15 +139,8 @@ async def async_setup_entry(
     # text. Pair it with a Repairs issue so the user gets a clickable
     # explanation of what to do (install/configure meshcore, or remove
     # meshcore_chat) on the Settings → System → Repairs page.
-    if not hass.data.get(MESHCORE_DOMAIN):
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            "upstream_meshcore_unavailable",
-            is_fixable=True,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key="upstream_meshcore_unavailable",
-        )
+    if not _upstream_meshcore_present(hass):
+        _sync_upstream_repair_issue(hass)
         raise ConfigEntryNotReady(
             "Upstream meshcore integration has no active config entries — "
             "set one up via Settings → Devices & Services."
@@ -105,7 +148,7 @@ async def async_setup_entry(
 
     # Upstream is back (or never went away) — clear any stale repair
     # issue so the Repairs panel doesn't show a fixed problem.
-    ir.async_delete_issue(hass, DOMAIN, "upstream_meshcore_unavailable")
+    _sync_upstream_repair_issue(hass)
 
     # Initialize the per-entry message store and load its lightweight index.
     store = MessageStore(hass, entry)

@@ -119,10 +119,17 @@ export class ConversationList extends LitElement {
       border-bottom: 1px solid var(--divider-color, #e0e0e0);
       cursor: pointer;
       transition: background 0.15s;
+      outline: none;
     }
 
-    .conversation-item:hover {
+    .conversation-item:hover,
+    .conversation-item:focus-visible {
       background: rgba(0, 0, 0, 0.02);
+    }
+
+    .conversation-item:focus-visible {
+      outline: 2px solid var(--primary-color, #03a9f4);
+      outline-offset: -2px;
     }
 
     .conversation-item.active {
@@ -230,21 +237,26 @@ export class ConversationList extends LitElement {
         <button
           class="compose-btn"
           title="Manage contacts & channels"
+          aria-label="Manage contacts and channels"
           @click=${() => this.dispatchEvent(new CustomEvent('manage-requested', { bubbles: true, composed: true }))}>
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
           </svg>
         </button>
       </div>
-      <div class="filter-bar">
+      <div class="filter-bar" role="tablist" aria-label="Conversation filter">
         ${this._renderFilterBtn('all', 'All')}
         ${this._renderFilterBtn('unread', 'Unread')}
         ${this._renderFilterBtn('dms', 'DMs')}
         ${this._renderFilterBtn('channels', 'Channels')}
       </div>
-      <div class="conversation-list">
+      <div
+        class="conversation-list"
+        role="listbox"
+        aria-label="Conversations"
+        @keydown=${this._onListKeyDown}>
         ${this._filteredConversations.length > 0
-          ? this._filteredConversations.map((conv) => this._renderConversation(conv))
+          ? this._filteredConversations.map((conv, idx) => this._renderConversation(conv, idx))
           : html`
               <div class="empty-state">
                 <div class="empty-text">
@@ -256,10 +268,63 @@ export class ConversationList extends LitElement {
     `;
   }
 
+  /**
+   * Phase 5 Q13: arrow-key navigation between conversation rows. Each
+   * row is a focusable role="option" (see _renderConversation); arrow
+   * keys move focus, Enter/Space selects, Home/End jump to ends.
+   */
+  private _onListKeyDown(e: KeyboardEvent) {
+    const key = e.key;
+    if (
+      key !== 'ArrowDown' &&
+      key !== 'ArrowUp' &&
+      key !== 'Home' &&
+      key !== 'End' &&
+      key !== 'Enter' &&
+      key !== ' '
+    ) {
+      return;
+    }
+
+    const root = this.shadowRoot;
+    if (!root) return;
+    const items = Array.from(
+      root.querySelectorAll<HTMLElement>('.conversation-item'),
+    );
+    if (items.length === 0) return;
+
+    const current = root.activeElement as HTMLElement | null;
+    let idx = current ? items.indexOf(current) : -1;
+
+    if (key === 'Enter' || key === ' ') {
+      if (current && idx >= 0) {
+        e.preventDefault();
+        current.click();
+      }
+      return;
+    }
+
+    e.preventDefault();
+    if (key === 'Home') {
+      idx = 0;
+    } else if (key === 'End') {
+      idx = items.length - 1;
+    } else if (key === 'ArrowDown') {
+      idx = idx < 0 ? 0 : Math.min(idx + 1, items.length - 1);
+    } else if (key === 'ArrowUp') {
+      idx = idx < 0 ? items.length - 1 : Math.max(idx - 1, 0);
+    }
+
+    items[idx]?.focus();
+  }
+
   private _renderFilterBtn(filter: ChatFilter, label: string) {
+    const active = this._activeFilter === filter;
     return html`
       <button
-        class="filter-btn ${this._activeFilter === filter ? 'active' : ''}"
+        class="filter-btn ${active ? 'active' : ''}"
+        role="tab"
+        aria-selected=${active ? 'true' : 'false'}
         @click=${() => { this._activeFilter = filter; }}>
         ${label}
       </button>
@@ -275,7 +340,7 @@ export class ConversationList extends LitElement {
     }
   }
 
-  private _renderConversation(conv: Contact | Channel) {
+  private _renderConversation(conv: Contact | Channel, listIdx: number) {
     const isContact = 'pubkey_prefix' in conv;
     const id = isContact ? (conv as Contact).pubkey_prefix : String((conv as Channel).channel_idx);
     const name = isContact ? (conv as Contact).adv_name : (conv as Channel).name;
@@ -286,9 +351,28 @@ export class ConversationList extends LitElement {
 
     const isActive = this.activeId === id;
 
+    const unread = this._getUnreadCount(id);
+    const ariaLabel = unread > 0
+      ? `${name}, ${detail}, ${unread} unread`
+      : `${name}, ${detail}`;
+
+    // Roving tabindex: exactly one item in the list is the Tab stop.
+    // Prefer the active item; if nothing is active, the first row.
+    const hasActiveInList = this._filteredConversations.some(
+      (c) =>
+        ('pubkey_prefix' in c
+          ? (c as Contact).pubkey_prefix
+          : String((c as Channel).channel_idx)) === this.activeId,
+    );
+    const isTabStop = isActive || (!hasActiveInList && listIdx === 0);
+
     return html`
       <div
         class=${isActive ? 'conversation-item active' : 'conversation-item'}
+        role="option"
+        tabindex=${isTabStop ? '0' : '-1'}
+        aria-selected=${isActive ? 'true' : 'false'}
+        aria-label=${ariaLabel}
         @click=${() => this.dispatchEvent(
           new CustomEvent('conversation-selected', { detail: { id, isContact } }),
         )}>
@@ -297,9 +381,9 @@ export class ConversationList extends LitElement {
           <div class="conversation-name">${name}</div>
           <div class="conversation-detail">${detail}</div>
         </div>
-        ${this._getUnreadCount(id) > 0
-          ? html`<div class="unread-badge">${this._getUnreadCount(id)}</div>`
-          : html`<span class="chevron">›</span>`}
+        ${unread > 0
+          ? html`<div class="unread-badge" aria-hidden="true">${unread}</div>`
+          : html`<span class="chevron" aria-hidden="true">›</span>`}
       </div>
     `;
   }

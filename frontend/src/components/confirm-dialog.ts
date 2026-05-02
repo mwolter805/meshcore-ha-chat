@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { panelStyles } from '../styles';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Reusable confirmation dialog component
@@ -21,6 +22,15 @@ export class ConfirmDialog extends LitElement {
 
   @state() private _typedValue = '';
 
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog (treated as cancel).
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._onCancel(),
+    });
+  }
+
   static styles = [
     panelStyles,
     css`
@@ -38,7 +48,11 @@ export class ConfirmDialog extends LitElement {
 
     return html`
       <div class="dialog-overlay" @click=${this._onOverlayClick}>
-        <div class="dialog">
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label=${this.title}>
           <div class="dialog-header">
             <div class="dialog-header-title">${this.title}</div>
           </div>

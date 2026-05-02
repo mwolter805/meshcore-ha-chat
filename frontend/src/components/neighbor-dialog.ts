@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { panelStyles } from '../styles';
 import type { HomeAssistant, NeighborInfo } from '../types';
 import { getNeighbors } from '../api';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 import './snr-chart';
 
 /**
@@ -22,6 +23,15 @@ export class NeighborDialog extends LitElement {
   @state() private _loading = true;
   @state() private _error: string | null = null;
   @state() private _chartData: Array<{ timestamp: number; values: Record<string, number> }> = [];
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog.
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._onClose(),
+    });
+  }
 
   static styles = [
     panelStyles,
@@ -131,10 +141,15 @@ export class NeighborDialog extends LitElement {
 
     return html`
       <div class="dialog-overlay" @click=${this._onOverlayClick}>
-        <div class="dialog" ?narrow=${this.narrow}>
+        <div
+          class="dialog"
+          ?narrow=${this.narrow}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Neighbors — ${this.deviceName}">
           <div class="dialog-header">
             <div class="dialog-header-title">Neighbors — ${this.deviceName}</div>
-            <button class="dialog-button" @click=${this._onClose}>✕</button>
+            <button class="dialog-button" aria-label="Close" @click=${this._onClose}>✕</button>
           </div>
 
           <div class="dialog-body">

@@ -2,11 +2,13 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant } from '../types';
 import { type SearchResult } from '../api';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Message search component — queries the persistent message store via
  * meshcore/search_stored_messages. Server-side text/sender filtering.
  * Fires 'result-selected' when a search result is clicked.
+ * Fires 'search-close' when the user presses Escape inside the panel.
  */
 @customElement('meshcore-message-search')
 export class MessageSearch extends LitElement {
@@ -14,6 +16,21 @@ export class MessageSearch extends LitElement {
   @property({ type: String }) entryId?: string;
   @property({ type: String }) entityId?: string;
   @property({ type: String }) meshNodeName?: string;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: structurally a side panel, not a modal — but the
+    // proposal's a11y pass treats it like one so keyboard-only users
+    // have a consistent dismiss key. Tab still cycles within the panel;
+    // the parent (chat-page) listens for `search-close` to hide it.
+    attachDialogA11y(this, {
+      isOpen: () => true,
+      onEscape: () =>
+        this.dispatchEvent(
+          new CustomEvent('search-close', { bubbles: true, composed: true }),
+        ),
+    });
+  }
 
   @state() private _query = '';
   @state() private _fromDate = '';
@@ -220,6 +237,7 @@ export class MessageSearch extends LitElement {
           <input
             class="search-input"
             type="text"
+            aria-label="Search messages"
             placeholder="Search messages..."
             .value=${this._query}
             @input=${this._onQueryInput}

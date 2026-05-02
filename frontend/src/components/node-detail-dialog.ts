@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Contact, ManagedDevice, HomeAssistant } from '../types';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 @customElement('meshcore-node-detail-dialog')
 export class NodeDetailDialog extends LitElement {
@@ -14,6 +15,24 @@ export class NodeDetailDialog extends LitElement {
 
   @state() private _confirming = false;
   @state() private _confirmAction: 'remove-contact' | null = null;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog. When a
+    // confirm sub-section is showing, Escape backs out of confirm mode
+    // rather than closing the whole dialog — matches the Cancel button.
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => {
+        if (this._confirming) {
+          this._confirming = false;
+          this._confirmAction = null;
+        } else {
+          this._close();
+        }
+      },
+    });
+  }
 
   static styles = css`
     :host {
@@ -273,14 +292,19 @@ export class NodeDetailDialog extends LitElement {
 
     return html`
       <div class="dialog-backdrop" @click=${this._close}>
-        <div class="dialog" @click=${(e: Event) => e.stopPropagation()}>
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Node detail — ${name}"
+          @click=${(e: Event) => e.stopPropagation()}>
           <div class="dialog-header">
             <div class=${`dialog-avatar ${typeClass}`}>${avatarSvg}</div>
             <div class="dialog-title">
               <div class="dialog-name">${name}</div>
               <div class="dialog-type">${typeLabel}</div>
             </div>
-            <button class="dialog-close" @click=${this._close}>✕</button>
+            <button class="dialog-close" aria-label="Close" @click=${this._close}>✕</button>
           </div>
 
           <div class="dialog-content">

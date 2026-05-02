@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant } from '../types';
 import { setChannel } from '../api';
 import { panelStyles } from '../styles';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Add/Edit Channel dialog with auto-key / custom-key toggle
@@ -28,6 +29,15 @@ export class ChannelDialog extends LitElement {
   @state() private _autoKey = true;
   @state() private _saving = false;
   @state() private _error: string | null = null;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape cancels (treated as close).
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._onCancel(),
+    });
+  }
 
   static styles = [
     panelStyles,
@@ -85,7 +95,11 @@ export class ChannelDialog extends LitElement {
       <div
         class="dialog-overlay"
         @click=${this._onOverlayClick}>
-        <div class="dialog">
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label=${this.editMode ? 'Edit channel' : 'Add channel'}>
           <div class="dialog-header">
             <div class="dialog-header-title">${this.editMode ? 'Edit Channel' : 'Add Channel'}</div>
           </div>

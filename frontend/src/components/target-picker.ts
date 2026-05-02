@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { panelStyles } from '../styles';
 import type { Contact } from '../types';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Session 56: target-picker.
@@ -37,7 +38,18 @@ export class TargetPicker extends LitElement {
   @state() private _typeFilter: 'all' | 'client' | 'repeater' | 'room_server' | 'sensor' = 'all';
   @state() private _search = '';
 
-  private _boundKeydown: ((e: KeyboardEvent) => void) | null = null;
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog. Replaces the
+    // document-level keydown listener previously installed in
+    // connectedCallback() — the controller's host-scoped listener
+    // handles both Escape and Tab cycling, with no leak risk on
+    // disconnect.
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._close(),
+    });
+  }
 
   static styles = [
     panelStyles,
@@ -177,24 +189,7 @@ export class TargetPicker extends LitElement {
     `,
   ];
 
-  connectedCallback() {
-    super.connectedCallback();
-    this._boundKeydown = (e: KeyboardEvent) => {
-      if (this.open && e.key === 'Escape') {
-        e.stopPropagation();
-        this._close();
-      }
-    };
-    document.addEventListener('keydown', this._boundKeydown);
-  }
-
-  disconnectedCallback() {
-    super.disconnectedCallback();
-    if (this._boundKeydown) {
-      document.removeEventListener('keydown', this._boundKeydown);
-      this._boundKeydown = null;
-    }
-  }
+  // Escape handling moved to DialogA11yController above.
 
   willUpdate(changed: Map<string, unknown>) {
     // Fresh-open reset: clear filters so each open starts clean.
@@ -233,10 +228,15 @@ export class TargetPicker extends LitElement {
 
     return html`
       <div class="dialog-backdrop" @click=${this._close}>
-        <div class="dialog" @click=${(e: Event) => e.stopPropagation()}>
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Choose trace target"
+          @click=${(e: Event) => e.stopPropagation()}>
           <div class="dialog-header">
             <div class="dialog-title">Choose Trace Target</div>
-            <button class="dialog-close" @click=${this._close} title="Close">✕</button>
+            <button class="dialog-close" aria-label="Close" @click=${this._close} title="Close">✕</button>
           </div>
           <div class="dialog-content">
             <div class="filter-row">

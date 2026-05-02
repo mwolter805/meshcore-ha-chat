@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { ChatMessage, MessageGroup, DeliveryStatus } from '../types';
 import { formatTimestamp } from '../chat/message-parser';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Generate a deterministic color from a string (e.g., pubkey prefix).
@@ -22,6 +23,16 @@ export class MessageBubble extends LitElement {
   @property({ type: String }) timestampFormat: 'relative' | 'time' | 'datetime' = 'relative';
 
   @state() private _selectedMessage: ChatMessage | null = null;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the message-action sheet.
+    attachDialogA11y(this, {
+      isOpen: () => this._selectedMessage !== null,
+      onEscape: () => { this._selectedMessage = null; },
+      getScope: () => this.shadowRoot?.querySelector('.message-dialog'),
+    });
+  }
 
   static styles = css`
     :host {
@@ -416,7 +427,9 @@ export class MessageBubble extends LitElement {
 
     return html`
       <div class="message-dialog-overlay" @click=${() => { this._selectedMessage = null; }}>
-        <div class="message-dialog" @click=${(e: Event) => e.stopPropagation()}>
+        <div class="message-dialog"
+             role="dialog" aria-modal="true" aria-label="Message actions"
+             @click=${(e: Event) => e.stopPropagation()}>
           <div class="message-dialog-preview">${msg.text}</div>
           <button class="message-dialog-action" @click=${() => this._copyText(msg.text)}>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align: -2px; margin-right: 4px;"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>Copy Text

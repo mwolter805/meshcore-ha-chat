@@ -16,13 +16,14 @@ import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 
-from . import MeshCoreChatRuntimeData
+from . import MeshCoreChatRuntimeData, _sync_upstream_repair_issue
 from .const import DOMAIN, MESHCORE_DOMAIN, ENTITY_DOMAIN_BINARY_SENSOR
 from .message_store import MessageStore
 from .utils import format_entity_id, sanitize_name
@@ -30,16 +31,87 @@ from .utils import format_entity_id, sanitize_name
 _LOGGER = logging.getLogger(__name__)
 
 
-def _get_coordinator(hass: HomeAssistant, entry_id: str | None = None):
-    """Get the upstream meshcore coordinator for ``entry_id``, or first available.
+# ─── Exception translations (Q10 half-step) ──────────────────────────────
+#
+# `strings.json` and `translations/en.json` carry the canonical user-facing
+# exception messages keyed under the top-level ``exceptions`` block. The
+# WS error path looks them up via ``_t(translation_key)``.
+#
+# Today the lookup resolves against the bundled ``translations/en.json``
+# at module import — single locale, no per-user resolution. The hard-
+# coded fallback dict (``_EXCEPTION_FALLBACKS``) keeps the call path
+# resilient if the JSON shape changes or the file is missing in some
+# distribution scenarios.
+#
+# Future direction: when Home Assistant's translation API gains stable
+# Python-side support for non-entity contexts (WS handlers, in
+# particular), replace ``_t(key)`` with the API call and feed it the
+# active user's language. The translation keys used by ``_WS_ERROR_MAP``
+# are deliberately stable so the future swap touches only the helper
+# body — not the call sites or the ``strings.json`` schema.
+#
+# Reference: https://developers.home-assistant.io/docs/internationalization/core
+# (the ``async_get_exception_message`` helper covers entity / device
+# contexts but is not yet a clean fit for ad-hoc WS-handler errors).
 
-    The companion does not own a coordinator — it consumes the upstream
-    integration's coordinator via ``hass.data[MESHCORE_DOMAIN][meshcore_entry_id]``.
-    The ``entry_id`` argument here, when supplied by the frontend, is the
-    *upstream* meshcore config-entry id (the chat panel discovers it via the
-    ``meshcore_chat/get_devices`` command, which in turn reads upstream's
-    coordinator registry). When omitted, the first registered upstream
-    coordinator is used.
+_EXCEPTION_FALLBACKS: dict[str, str] = {
+    "operation_failed": "Operation failed",
+    "device_not_connected": "Device not connected",
+    "operation_timed_out": "Operation timed out",
+    "invalid_request": "Invalid request parameters",
+    "no_meshcore_coordinator": "No active MeshCore coordinator",
+}
+
+
+def _load_bundled_exception_messages() -> dict[str, str]:
+    """Load ``exceptions.<key>.message`` from the bundled en translations.
+
+    Falls back to ``_EXCEPTION_FALLBACKS`` if the file is missing,
+    malformed, or a key is absent. This keeps the WS error path
+    resilient — a missing translation never raises, it just degrades to
+    the hard-coded English string.
+    """
+    path = Path(__file__).parent / "translations" / "en.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        block = data.get("exceptions") or {}
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return dict(_EXCEPTION_FALLBACKS)
+
+    resolved = dict(_EXCEPTION_FALLBACKS)
+    for key, entry in block.items():
+        if isinstance(entry, dict):
+            message = entry.get("message")
+            if isinstance(message, str) and message:
+                resolved[key] = message
+    return resolved
+
+
+_EXCEPTION_MESSAGES: dict[str, str] = _load_bundled_exception_messages()
+
+
+def _t(key: str) -> str:
+    """Look up a translated exception message.
+
+    Today: returns the en-locale literal from the bundled
+    ``translations/en.json`` (loaded once at import). Falls back to the
+    hard-coded English string in ``_EXCEPTION_FALLBACKS`` if the key is
+    absent. Never raises.
+
+    Future: integrate with HA's translation infrastructure for per-user
+    locale resolution. See the module-level comment above.
+    """
+    return _EXCEPTION_MESSAGES.get(key) or _EXCEPTION_FALLBACKS.get(key) or key
+
+
+def _resolve_coordinator(hass: HomeAssistant, entry_id: str | None = None):
+    """Discovery-only: locate the upstream meshcore coordinator.
+
+    Pure lookup — no side effects. The wrapper ``_get_coordinator`` is
+    the public-ish entry point that adds the repair-issue sync; this
+    inner helper is what callers use when they need the discovery result
+    without triggering the issue create/delete (currently only the
+    wrapper itself).
     """
     if MESHCORE_DOMAIN not in hass.data:
         return None
@@ -57,8 +129,12 @@ def _get_coordinator(hass: HomeAssistant, entry_id: str | None = None):
     return None
 
 
-def _get_all_coordinators(hass: HomeAssistant) -> list:
-    """Get all active upstream coordinators."""
+def _resolve_all_coordinators(hass: HomeAssistant) -> list:
+    """Discovery-only: enumerate all active upstream coordinators.
+
+    Pure lookup — no side effects. See ``_resolve_coordinator`` doc for
+    the inner-vs-wrapper split.
+    """
     if MESHCORE_DOMAIN not in hass.data:
         return []
     return [
@@ -68,14 +144,55 @@ def _get_all_coordinators(hass: HomeAssistant) -> list:
     ]
 
 
-# Maps Python exception types to WS error codes + user-facing messages.
+def _get_coordinator(hass: HomeAssistant, entry_id: str | None = None):
+    """Get the upstream meshcore coordinator for ``entry_id``, or first available.
+
+    The companion does not own a coordinator — it consumes the upstream
+    integration's coordinator via ``hass.data[MESHCORE_DOMAIN][meshcore_entry_id]``.
+    The ``entry_id`` argument here, when supplied by the frontend, is the
+    *upstream* meshcore config-entry id (the chat panel discovers it via the
+    ``meshcore_chat/get_devices`` command, which in turn reads upstream's
+    coordinator registry). When omitted, the first registered upstream
+    coordinator is used.
+
+    Side effect: synchronizes the ``upstream_meshcore_unavailable`` repair
+    issue based on what discovery just observed. Idempotent (HA dedupes
+    by (domain, issue_id); delete-on-non-existent is a no-op), so the
+    panel-polling rate is safe.
+    """
+    coord = _resolve_coordinator(hass, entry_id)
+    _sync_upstream_repair_issue(hass)
+    return coord
+
+
+def _get_all_coordinators(hass: HomeAssistant) -> list:
+    """Get all active upstream coordinators.
+
+    Side effect: synchronizes the ``upstream_meshcore_unavailable`` repair
+    issue based on what discovery just observed (see ``_get_coordinator``
+    for the rationale).
+    """
+    coords = _resolve_all_coordinators(hass)
+    _sync_upstream_repair_issue(hass)
+    return coords
+
+
+# Maps Python exception types to WS error codes + translation keys.
 # Order matters — first match wins. Add new entries above the catch-all
 # in ``_ws_send_error_safe`` to surface specific failures before they
 # fall through to "error".
+#
+# The third tuple element is a translation key from ``strings.json``'s
+# ``exceptions`` block, not a literal message. ``_ws_send_error_safe``
+# resolves it via ``_t(key)`` so the user-facing text lives in
+# ``strings.json`` / ``translations/en.json`` rather than scattered
+# across the code (Q10 half-step). The WS error *codes* (the second
+# tuple element) are unchanged — clients keying on ``timeout`` /
+# ``not_connected`` / ``invalid`` continue to work.
 _WS_ERROR_MAP: list[tuple[type[BaseException], str, str]] = [
-    (asyncio.TimeoutError, "timeout", "Operation timed out"),
-    (ConnectionError, "not_connected", "Device not connected"),
-    (vol.Invalid, "invalid", "Invalid request parameters"),
+    (asyncio.TimeoutError, "timeout", "operation_timed_out"),
+    (ConnectionError, "not_connected", "device_not_connected"),
+    (vol.Invalid, "invalid", "invalid_request"),
 ]
 
 
@@ -86,7 +203,7 @@ def _ws_send_error_safe(
     *,
     handler: str,
     default_code: str = "error",
-    default_message: str = "Operation failed",
+    default_translation_key: str = "operation_failed",
 ) -> None:
     """Log a WS handler exception with context and send a generic error.
 
@@ -94,13 +211,17 @@ def _ws_send_error_safe(
     user-facing message to the client — internal exception strings (which
     may include path info, SDK details, or stack-trace fragments) are
     deliberately not echoed.
+
+    User-facing messages are resolved via ``_t(translation_key)`` so the
+    canonical text lives in ``strings.json`` / ``translations/en.json``
+    rather than literal strings inline (Q10 half-step).
     """
     _LOGGER.exception("%s failed: %s", handler, ex)
-    for exc_type, code, message in _WS_ERROR_MAP:
+    for exc_type, code, translation_key in _WS_ERROR_MAP:
         if isinstance(ex, exc_type):
-            connection.send_error(msg_id, code, message)
+            connection.send_error(msg_id, code, _t(translation_key))
             return
-    connection.send_error(msg_id, default_code, default_message)
+    connection.send_error(msg_id, default_code, _t(default_translation_key))
 
 
 # One-shot guard so the legacy-fallback warning fires at most once per

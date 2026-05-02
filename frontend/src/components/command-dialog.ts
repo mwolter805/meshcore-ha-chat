@@ -5,6 +5,7 @@ import { executeLocal, executeRemote } from '../api';
 import { LOCAL_COMMANDS } from '../commands/local-commands';
 import { REMOTE_COMMANDS } from '../commands/remote-commands';
 import { panelStyles } from '../styles';
+import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
  * Command dialog for issuing local or remote commands to MeshCore devices
@@ -20,6 +21,15 @@ export class CommandDialog extends LitElement {
   @property({ type: String }) targetPrefix?: string;
   @property({ type: Boolean }) isLocal = false;
   @property({ type: Boolean }) narrow = false;
+
+  constructor() {
+    super();
+    // Phase 5 Q13: focus trap + Escape closes the dialog.
+    attachDialogA11y(this, {
+      isOpen: () => this.open,
+      onEscape: () => this._onClose(),
+    });
+  }
 
   @state() private _selectedCommand: CommandDef | null = null;
   @state() private _paramValues: Record<string, unknown> = {};
@@ -89,7 +99,11 @@ export class CommandDialog extends LitElement {
       <div
         class="dialog-overlay"
         @click=${this._onOverlayClick}>
-        <div class="dialog">
+        <div
+          class="dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Issue command">
           <div class="dialog-header">
             <div style="flex: 1;">
               <div class="dialog-header-title">Issue Command</div>

@@ -442,13 +442,25 @@ export class MeshCorePanel extends LitElement {
     }
 
     if (this._error && !this._config) {
+      // When the error is the "no devices found" empty-state, the
+      // upstream meshcore integration is most likely missing or
+      // unconfigured — the companion's repair-issue plumbing
+      // (upstream_meshcore_unavailable) carries the proper remediation
+      // copy, so point the user at Settings → System → Repairs.
+      // Other error strings (e.g. "Failed to load: ...") keep the
+      // legacy generic copy.
+      const isNoDevices = this._error === 'No MeshCore devices found';
       return html`
         <div class="panel">
           <div class="center-message">
             <div>
               <p>${this._error}</p>
               <p style="font-size: 12px; margin-top: 8px;">
-                Check that the MeshCore integration is loaded and connected.
+                ${isNoDevices
+                  ? html`Open <a href="/config/repairs">Settings &rarr; System &rarr; Repairs</a>
+                         for setup guidance, or add the MeshCore integration via
+                         <a href="/config/integrations">Settings &rarr; Devices &amp; Services</a>.`
+                  : 'Check that the MeshCore integration is loaded and connected.'}
               </p>
             </div>
           </div>
