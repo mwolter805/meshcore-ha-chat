@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -1475,6 +1476,208 @@ async def ws_mark_read(hass, connection, msg):
 
 
 # ─── PHASE 4: Identity Management ────────────────────────────────────────
+#
+# Phase 1.1 redesign (post-deploy 2026-05-03 forensics F09-F11). Phase 1
+# delegated to ``meshcore.execute_command`` and used the wrong key format
+# (``seed || verify_key`` instead of the SHA-512-expanded clamped secret
+# the firmware actually accepts), then silently swallowed firmware ERRORs
+# because the service-call path had no surface to detect them. The
+# ``return_response=True`` workaround tripped HA's framework validation
+# on OK-with-empty-payload responses. See the proposal §Phase 1 — Field
+# Issues Discovered for the full forensics.
+#
+# Phase 1.1 abandons the service-delegation path and calls the SDK
+# directly:
+#
+# 1. ``coord.api.mesh_core.commands.import_private_key(seed_bytes)`` —
+#    direct SDK call returning an ``Event``. ``EventType.ERROR`` is
+#    inspected and surfaced as ``IdentityImportError`` so the firmware's
+#    rejection (e.g. ``ERR_CODE_ILLEGAL_ARG``) reaches the user instead
+#    of getting buried as a false success.
+# 2. ``send_appstart`` + ``_cache_self_info_event`` — replicates
+#    services.py's ``_SELF_INFO_COMMANDS`` post-call refresh inline so we
+#    don't depend on the service for the cache update.
+# 3. ``coord.api.mesh_core.commands.reboot()`` — direct SDK call. The
+#    firmware only switches identities on next boot.
+# 4. Brief ``asyncio.sleep`` while transport-layer reconnect completes
+#    (SDK ``connection_manager`` handles the reconnect itself; see R1).
+# 5. ``hass.config_entries.async_reload(meshcore_entry_id)`` — fires the
+#    pubkey-detection hook in upstream ``async_setup_entry``
+#    (meshcore-ha PR #169, ``__init__.py:319-348``), which calls
+#    ``_migrate_entity_ids(old_prefix, new_prefix)`` and creates the
+#    ``pubkey_changed_<entry_id>`` repair issue automatically.
+# 6. Verify-after-reload guard: re-resolve the coordinator and confirm
+#    ``coord.pubkey != old_pubkey``. Belt-and-suspenders against any
+#    "OK + reload + same pubkey" edge case where the firmware accepted
+#    the import but failed to persist (R8).
+#
+# Each step emits a streaming progress event so the panel modal can show
+# a step checklist instead of a single toast — terminal state still uses
+# ``send_result`` / ``send_error`` (the standard HA WS pattern;
+# ``subscribeMessage`` on the frontend is the matching call).
+#
+# Key format: ``_seed_to_meshcore_priv(seed)`` expands a 32-byte Ed25519
+# seed into the firmware's 64-byte expanded clamped secret form (RFC
+# 8032 §5.1.5). Firmware-truth-derived; verified by scalar-mult parity
+# against the device's stored pubkey.
+#
+# Forensics: ``docs/Forensics - Identity Surfaces and Rename Device.md``
+# (F01-F05, F07-F08); proposal §Phase 1 — Field Issues Discovered (F09-F11).
+
+
+class IdentityImportError(Exception):
+    """Raised when an identity import does not take effect on the device.
+
+    Carries a human-readable message describing the firmware-reported
+    failure (e.g. ``firmware rejected key: ERR_CODE_ILLEGAL_ARG``) or
+    the verify-after-reload mismatch. The WS handler surfaces this via
+    ``connection.send_error(..., "import_rejected", str(ex))`` so the
+    frontend modal can render the actual error text instead of a
+    generic "failed" toast (forensics F10).
+    """
+
+
+def _seed_to_meshcore_priv(seed: bytes) -> bytes:
+    """Expand a 32-byte Ed25519 seed into MeshCore's 64-byte private-key form.
+
+    MeshCore firmware (``Identity.cpp:51`` ``validatePrivateKey``) calls
+    ``ed25519_derive_pub`` on the 64-byte input — this only succeeds
+    when the bytes are the Ed25519 *expanded clamped secret* form:
+    SHA-512(seed) with byte[0] cleared in the lowest 3 bits, byte[31]
+    cleared in the top bit and set in bit 6 (RFC 8032 §5.1.5).
+
+    Verified live against firmware v1.14.1 (proposal §F09 evidence):
+    scalar-mult of ``expanded[:32]`` by the Ed25519 base point yields
+    the device's stored public key; ``expanded[0] & 7 == 0``;
+    ``expanded[31]`` satisfies the clamping inequality.
+
+    The PyNaCl / libsodium ``crypto_sign_seed_keypair`` "secret key" is
+    ``seed || public_key``, NOT this expanded form — pushing that to
+    ``import_private_key`` is rejected with ``ERR_CODE_ILLEGAL_ARG``.
+    """
+    if len(seed) != 32:
+        raise ValueError(f"Ed25519 seed must be 32 bytes, got {len(seed)}")
+    h = bytearray(hashlib.sha512(seed).digest())
+    h[0] &= 0xF8
+    h[31] &= 0x7F
+    h[31] |= 0x40
+    return bytes(h)
+
+
+async def _do_identity_change(
+    hass,
+    connection,
+    msg_id,
+    coord,
+    meshcore_entry_id,
+    old_pubkey,
+    seed_bytes,
+):
+    """Streaming-progress identity change.
+
+    Emits one ``websocket_api.event_message`` per step; on terminal
+    success calls ``connection.send_result``; on terminal failure
+    raises ``IdentityImportError`` (caller surfaces via
+    ``connection.send_error``). Caller is responsible for the initial
+    ``{"step": "generating"}`` event — the source of seed bytes differs
+    between regenerate (host-generate via ``os.urandom``) and import
+    (user-supplied 64- or 128-char hex).
+
+    ``seed_bytes`` is the firmware-native 64-byte expanded clamped
+    secret. For 32-byte raw seeds use ``_seed_to_meshcore_priv``; for
+    user-supplied 128-hex input pass ``bytes.fromhex(raw)`` directly
+    (already firmware-native, matches ``export_private_key`` output).
+    """
+    from meshcore.events import EventType
+
+    # Step 2 — import. Direct SDK call; inspect Event.type for ERROR
+    # (forensics F10/F11 — the service path silently swallowed firmware
+    # errors and the return_response=True workaround tripped HA's
+    # framework validation on empty-payload OK responses).
+    connection.send_message(
+        websocket_api.event_message(msg_id, {"step": "importing"})
+    )
+    result = await coord.api.mesh_core.commands.import_private_key(seed_bytes)
+    if result is None or getattr(result, "type", None) == EventType.ERROR:
+        code = "unknown"
+        if result is not None:
+            payload = getattr(result, "payload", None) or {}
+            code = payload.get("code_string") or payload.get("error_code") or "unknown"
+        raise IdentityImportError(f"firmware rejected key: {code}")
+
+    # Step 2b — refresh self_info (mimics services.py _SELF_INFO_COMMANDS
+    # post-call refresh, services.py:656-664). Wrapped in try/except: pass
+    # because the reload re-fetches anyway and a self_info hiccup
+    # shouldn't abort the chain. The call itself must be present
+    # (proposal R10 — covered by T1.11 unit assertion).
+    try:
+        appstart = await coord.api.mesh_core.commands.send_appstart()
+        coord.api._cache_self_info_event(appstart)
+    except Exception:  # pragma: no cover - defensive
+        _LOGGER.debug("self_info refresh after import_private_key failed; "
+                      "the upcoming entry reload will re-fetch it")
+
+    # Step 3 — reboot. Firmware only switches identity on next boot.
+    connection.send_message(
+        websocket_api.event_message(msg_id, {"step": "rebooting"})
+    )
+    await coord.api.mesh_core.commands.reboot()
+
+    # Step 4 — wait for the device to come back. The SDK's
+    # connection_manager handles transport-level reconnect; we just need
+    # to not race the reload. 3 seconds is a placeholder — see proposal
+    # Risk R1.
+    # TODO: replace with EventType.CONNECTED await once the SDK exposes
+    # a clean reconnect-completed signal.
+    connection.send_message(
+        websocket_api.event_message(msg_id, {"step": "reconnecting"})
+    )
+    await asyncio.sleep(3.0)
+
+    # Step 5 — reload the config entry. PR #169's async_setup_entry hook
+    # detects the new pubkey and migrates entity IDs automatically.
+    connection.send_message(
+        websocket_api.event_message(msg_id, {"step": "reloading"})
+    )
+    await hass.config_entries.async_reload(meshcore_entry_id)
+
+    # Step 6 — verify the pubkey actually changed (proposal R8). The
+    # post-reload coordinator should reflect the new identity; if it
+    # doesn't, the import didn't actually persist on the device and the
+    # success path would be a lie.
+    connection.send_message(
+        websocket_api.event_message(msg_id, {"step": "verifying"})
+    )
+    new_coord = _get_coordinator(hass, meshcore_entry_id)
+    new_pubkey = new_coord.pubkey if new_coord else None
+    if not new_pubkey or new_pubkey == old_pubkey:
+        raise IdentityImportError(
+            "device pubkey unchanged after reload — import did not take effect"
+        )
+
+    # Terminal success — the data ride on a final ``done`` event_message
+    # because ``home-assistant-js-websocket``'s ``subscribeMessage``
+    # promise-resolves with the unsubscribe handle only and discards the
+    # ``send_result`` payload (verified against
+    # ``home-assistant-js-websocket/lib/connection.ts`` 2026-05). The
+    # frontend wrapper unpacks the ``done`` event into the typed
+    # ``IdentityFlowResult``.
+    connection.send_message(
+        websocket_api.event_message(
+            msg_id,
+            {
+                "step": "done",
+                "success": True,
+                "old_pubkey": old_pubkey,
+                "new_pubkey": new_pubkey,
+                "warning": (
+                    "Device rebooted with new identity. Entity IDs migrated. "
+                    "All contacts must re-add this device."
+                ),
+            },
+        )
+    )
+    connection.send_result(msg_id, {"success": True})
 
 
 @websocket_api.websocket_command(
@@ -1486,21 +1689,41 @@ async def ws_mark_read(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_regenerate_identity(hass, connection, msg):
-    """Regenerate device identity (new public key)."""
+    """Regenerate identity by host-generating a fresh seed and importing it.
+
+    Streaming handler — emits one ``event_message`` per step
+    (generating → importing → rebooting → reconnecting → reloading →
+    verifying), then terminates with ``send_result`` (success) or
+    ``send_error`` (failure). See ``_do_identity_change`` for the body.
+    """
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
+        connection.send_error(msg["id"], "not_found", _t("no_meshcore_coordinator"))
         return
 
+    meshcore_entry_id = coordinator.config_entry.entry_id
+    old_pubkey = coordinator.pubkey
+
     try:
-        await coordinator.api.mesh_core.commands.regenerate_key()
-        self_info = getattr(coordinator.api, "self_info", {}) or {}
-        new_pubkey = self_info.get("pubkey", "unknown")
-        connection.send_result(msg["id"], {
-            "success": True,
-            "new_pubkey": new_pubkey,
-            "warning": "All contacts must re-add this device with the new public key.",
-        })
+        # Step 1 — generate. Host-side fresh entropy via os.urandom →
+        # /dev/urandom on Linux (PyNaCl no longer used here; the
+        # SHA-512 + clamping happens in _seed_to_meshcore_priv).
+        connection.send_message(
+            websocket_api.event_message(msg["id"], {"step": "generating"})
+        )
+        seed_bytes = _seed_to_meshcore_priv(os.urandom(32))
+
+        await _do_identity_change(
+            hass,
+            connection,
+            msg["id"],
+            coordinator,
+            meshcore_entry_id,
+            old_pubkey,
+            seed_bytes,
+        )
+    except IdentityImportError as ex:
+        connection.send_error(msg["id"], "import_rejected", str(ex))
     except Exception as ex:
         _ws_send_error_safe(
             connection, msg["id"], ex, handler="ws_regenerate_identity"
@@ -1517,19 +1740,60 @@ async def ws_regenerate_identity(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_import_identity(hass, connection, msg):
-    """Import a private key to restore identity."""
+    """Import a hex-encoded private key, reboot device, reload config entry.
+
+    Streaming handler — see ``ws_regenerate_identity`` doc for the
+    event-message contract.
+
+    Accepts both 64-char (raw 32-byte Ed25519 seed; expanded host-side
+    via ``_seed_to_meshcore_priv``) and 128-char (already firmware-
+    native 64-byte expanded form, matches ``export_private_key`` output)
+    inputs.
+    """
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
+        connection.send_error(msg["id"], "not_found", _t("no_meshcore_coordinator"))
         return
 
+    # Strip whitespace anywhere in the input — paste-friendly.
+    raw = msg["private_key"].strip().replace(" ", "").replace("\n", "")
+    if len(raw) not in (64, 128) or len(raw) % 2 != 0:
+        connection.send_error(msg["id"], "invalid", _t("invalid_key_length"))
+        return
     try:
-        await coordinator.api.mesh_core.commands.import_key(msg["private_key"])
-        self_info = getattr(coordinator.api, "self_info", {}) or {}
-        connection.send_result(msg["id"], {
-            "success": True,
-            "pubkey": self_info.get("pubkey", "unknown"),
-        })
+        raw_bytes = bytes.fromhex(raw)
+    except ValueError:
+        connection.send_error(msg["id"], "invalid", _t("invalid_key_hex"))
+        return
+
+    meshcore_entry_id = coordinator.config_entry.entry_id
+    old_pubkey = coordinator.pubkey
+
+    try:
+        # Step 1 — generate (or expand). 32-byte input is treated as the
+        # raw Ed25519 seed and expanded into the firmware-native 64-byte
+        # form; 64-byte input is passed through unchanged (already in
+        # the firmware native format that ``export_private_key``
+        # returns). See proposal R4.
+        connection.send_message(
+            websocket_api.event_message(msg["id"], {"step": "generating"})
+        )
+        if len(raw_bytes) == 32:
+            seed_bytes = _seed_to_meshcore_priv(raw_bytes)
+        else:
+            seed_bytes = raw_bytes
+
+        await _do_identity_change(
+            hass,
+            connection,
+            msg["id"],
+            coordinator,
+            meshcore_entry_id,
+            old_pubkey,
+            seed_bytes,
+        )
+    except IdentityImportError as ex:
+        connection.send_error(msg["id"], "import_rejected", str(ex))
     except Exception as ex:
         _ws_send_error_safe(
             connection, msg["id"], ex, handler="ws_import_identity"

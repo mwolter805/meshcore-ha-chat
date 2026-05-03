@@ -5,10 +5,10 @@ import {
   getDeviceConfig,
   setDeviceConfig,
   executeLocal,
-  regenerateIdentity,
-  importIdentity,
+  subscribeIdentityChange,
   setLocationSource,
 } from '../api';
+import type { IdentityFlowStep } from '../api';
 import '../components/confirm-dialog';
 import '../components/command-dialog';
 import '../components/sensor-tile';
@@ -24,6 +24,60 @@ interface ConfirmAction {
   onConfirm: () => Promise<void>;
   requireTyped?: string;
 }
+
+/**
+ * State for the streaming-progress identity-change modal (Phase 1.1).
+ *
+ * The Regenerate / Import flow takes ~5-10s end-to-end (host-side seed
+ * generate + clamp, SDK ``import_private_key``, device reboot, transport
+ * reconnect, config-entry reload, post-reload pubkey verify). The
+ * single-toast UX from Phase 1 was insufficient for an irreversible
+ * change of this duration; this state machine drives a step checklist
+ * during the flow and a terminal panel afterward (success or failure).
+ */
+type IdentityFlowKind = 'regenerate' | 'import';
+
+type IdentityFlowState =
+  | { kind: 'closed' }
+  | {
+      kind: 'progress';
+      flow: IdentityFlowKind;
+      currentStep: IdentityFlowStep;
+      completedSteps: Set<IdentityFlowStep>;
+    }
+  | {
+      kind: 'success';
+      flow: IdentityFlowKind;
+      oldPubkey: string;
+      newPubkey: string;
+      warning?: string;
+    }
+  | {
+      kind: 'failure';
+      flow: IdentityFlowKind;
+      code: string;
+      message: string;
+    };
+
+/**
+ * Ordered checklist for the progress panel. Each entry is one step
+ * the backend emits as a ``{step}`` event_message; the UI marks it as
+ * completed when a *later* step arrives (or as the current spinner if
+ * it's the most recent event). Order matches
+ * ``ws_api._do_identity_change`` and the regenerate/import handlers'
+ * initial ``generating`` event.
+ */
+const IDENTITY_FLOW_STEP_ORDER: ReadonlyArray<{
+  step: IdentityFlowStep;
+  label: string;
+}> = [
+  { step: 'generating', label: 'Generating new key' },
+  { step: 'importing', label: 'Sending key to device' },
+  { step: 'rebooting', label: 'Rebooting device' },
+  { step: 'reconnecting', label: 'Waiting for device reconnect' },
+  { step: 'reloading', label: 'Reloading MeshCore integration' },
+  { step: 'verifying', label: 'Verifying new identity' },
+];
 
 /**
  * Full settings page with multiple collapsible sections and companion device card at top
@@ -62,6 +116,10 @@ export class SettingsPage extends LitElement {
   // Key management modal
   @state() private _keyManagementModalOpen = false;
 
+  // Phase 1.1 — streaming identity-change flow (Regenerate / Import).
+  @state() private _identityFlowState: IdentityFlowState = { kind: 'closed' };
+  private _identityFlowUnsubscribe: (() => void) | null = null;
+
   // Hidden sensors modal
   @state() private _hiddenSensorsModalKey: string | null = null;
 
@@ -91,6 +149,22 @@ export class SettingsPage extends LitElement {
       isOpen: () => this._hiddenSensorsModalKey !== null,
       onEscape: () => this._closeHiddenSensorsModal(),
       getScope: () => this.shadowRoot?.querySelector('[data-a11y="hidden-sensors"]'),
+    });
+    attachDialogA11y(this, {
+      // Identity-flow modal is non-dismissible while in-flight; only
+      // terminal states (success / failure) accept Escape via the
+      // close button. The a11y attach still focus-traps the panel
+      // when open.
+      isOpen: () => this._identityFlowState.kind !== 'closed',
+      onEscape: () => {
+        if (
+          this._identityFlowState.kind === 'success' ||
+          this._identityFlowState.kind === 'failure'
+        ) {
+          this._closeIdentityFlowModal();
+        }
+      },
+      getScope: () => this.shadowRoot?.querySelector('[data-a11y="identity-flow"]'),
     });
   }
 
@@ -786,6 +860,9 @@ export class SettingsPage extends LitElement {
       <!-- Hidden Sensors Modal -->
       ${this._hiddenSensorsModalKey ? this._renderHiddenSensorsModal() : nothing}
 
+      <!-- Identity Flow Modal (Phase 1.1 streaming progress) -->
+      ${this._renderIdentityFlowModal()}
+
       <!-- Status Toast -->
       ${this._statusMessage ? html`
         <div class="status-toast ${this._statusMessage.type}">
@@ -1402,27 +1479,40 @@ export class SettingsPage extends LitElement {
   private _showRegenIdentityConfirm() {
     this._confirmAction = {
       title: 'Regenerate Identity',
-      message: 'This will create a new cryptographic identity. All existing contacts will need to re-add your device. All entity IDs will change — automations, scripts, and dashboards using current entity IDs will need to be updated. This cannot be undone.',
+      message: 'This will create a new cryptographic identity, reboot the device, and migrate all entity IDs to the new key prefix. Existing automations referencing entity IDs by the old prefix will need updating. All contacts must re-add this device. This cannot be undone.',
       requireTyped: 'REGENERATE',
       onConfirm: async () => {
         if (!this.hass) return;
-        const result = await regenerateIdentity(this.hass, this.config?.node_prefix);
-        if (result.success) {
-          this._showStatusMessage(`New identity created: ${result.new_pubkey?.slice(0, 8)}...`, 'success');
-          await this._loadDeviceConfig();
-        } else {
-          this._showStatusMessage('Identity regeneration failed', 'error');
-        }
+        // Close the Key Management modal so the progress modal isn't
+        // stacked on top of a stale UI (Phase 1.1 §Change 13 — confirm
+        // dialog already closes via _onConfirmAction).
+        this._closeKeyManagementModal();
+        this._startIdentityFlow('regenerate', {
+          type: 'meshcore_chat/regenerate_identity',
+          payload: this.config?.node_prefix
+            ? { entry_id: this.config.node_prefix }
+            : {},
+        });
       },
     };
     this._confirmDialogOpen = true;
   }
 
   private _handleImportKeyConfirm() {
-    if (!this._importKeyValue.trim()) return;
+    const raw = this._importKeyValue.trim().replace(/\s+/g, '');
+    if (!raw) return;
+    if (raw.length !== 64 && raw.length !== 128) {
+      this._showStatusMessage('Private key must be 64 or 128 hex characters', 'error');
+      return;
+    }
+    if (!/^[0-9a-fA-F]+$/.test(raw)) {
+      this._showStatusMessage('Private key must be hex (0-9, a-f)', 'error');
+      return;
+    }
     this._confirmAction = {
       title: 'Import Private Key',
-      message: 'Importing a private key changes the device identity. All entity IDs will change — automations, scripts, and dashboards using current entity IDs will need to be updated. A reboot is required after import.',
+      message: 'Importing a private key will replace the device identity, reboot the device, and migrate all entity IDs to the new key prefix. Existing automations referencing entity IDs by the old prefix will need updating. All contacts must re-add this device.',
+      requireTyped: 'IMPORT',
       onConfirm: () => this._importIdentityKey(),
     };
     this._confirmDialogOpen = true;
@@ -1430,18 +1520,199 @@ export class SettingsPage extends LitElement {
 
   private async _importIdentityKey() {
     if (!this.hass || !this._importKeyValue.trim()) return;
-    try {
-      const result = await importIdentity(this.hass, this._importKeyValue.trim(), this.config?.node_prefix);
-      if (result.success) {
-        this._importKeyValue = '';
-        this._showStatusMessage(`Identity imported: ${result.pubkey?.slice(0, 8)}...`, 'success');
-        await this._loadDeviceConfig();
-      } else {
-        this._showStatusMessage('Identity import failed', 'error');
-      }
-    } catch (error) {
-      this._showStatusMessage(`Error: ${String(error)}`, 'error');
+    const sanitized = this._importKeyValue.trim().replace(/\s+/g, '');
+    // Close the Key Management modal so the progress modal isn't
+    // stacked on top of a stale UI.
+    this._closeKeyManagementModal();
+    this._importKeyValue = '';
+    const payload: Record<string, unknown> = { private_key: sanitized };
+    if (this.config?.node_prefix) payload.entry_id = this.config.node_prefix;
+    this._startIdentityFlow('import', {
+      type: 'meshcore_chat/import_identity',
+      payload,
+    });
+  }
+
+  /**
+   * Open the streaming-progress identity modal and wire the WS
+   * subscription. The modal is non-dismissible while in-flight; the
+   * Close button only renders on terminal panels.
+   *
+   * Each ``progress`` event marks the previous step as completed and
+   * advances ``currentStep``. ``result`` and ``error`` events
+   * transition to the corresponding terminal panel.
+   */
+  private _startIdentityFlow(
+    flow: IdentityFlowKind,
+    request: { type: 'meshcore_chat/regenerate_identity' | 'meshcore_chat/import_identity'; payload: Record<string, unknown> },
+  ) {
+    if (!this.hass) return;
+    // Reset any leftover subscription from a previous flow.
+    if (this._identityFlowUnsubscribe) {
+      this._identityFlowUnsubscribe();
+      this._identityFlowUnsubscribe = null;
     }
+    this._identityFlowState = {
+      kind: 'progress',
+      flow,
+      currentStep: 'generating',
+      completedSteps: new Set(),
+    };
+    const { unsubscribe } = subscribeIdentityChange(
+      this.hass,
+      request.type,
+      request.payload,
+      (event) => {
+        if (event.type === 'progress') {
+          if (this._identityFlowState.kind !== 'progress') return;
+          const completed = new Set(this._identityFlowState.completedSteps);
+          // Mark the previous currentStep as completed.
+          completed.add(this._identityFlowState.currentStep);
+          this._identityFlowState = {
+            ...this._identityFlowState,
+            currentStep: event.step,
+            completedSteps: completed,
+          };
+        } else if (event.type === 'result') {
+          this._identityFlowState = {
+            kind: 'success',
+            flow,
+            oldPubkey: event.data.old_pubkey,
+            newPubkey: event.data.new_pubkey,
+            warning: event.data.warning,
+          };
+        } else if (event.type === 'error') {
+          this._identityFlowState = {
+            kind: 'failure',
+            flow,
+            code: event.data.code,
+            message: event.data.message,
+          };
+        }
+      },
+    );
+    this._identityFlowUnsubscribe = unsubscribe;
+  }
+
+  private _closeIdentityFlowModal() {
+    if (this._identityFlowUnsubscribe) {
+      this._identityFlowUnsubscribe();
+      this._identityFlowUnsubscribe = null;
+    }
+    const wasSuccess = this._identityFlowState.kind === 'success';
+    this._identityFlowState = { kind: 'closed' };
+    // Refresh the parent settings panel so the new pubkey is reflected
+    // even if the user closed without re-opening Key Management.
+    if (wasSuccess) {
+      void this._loadDeviceConfig();
+    }
+  }
+
+  private _renderIdentityFlowModal() {
+    const state = this._identityFlowState;
+    if (state.kind === 'closed') return nothing;
+
+    const flowLabel = state.flow === 'regenerate' ? 'Regenerate Identity' : 'Import Private Key';
+    const inFlightTitle = state.flow === 'regenerate' ? 'Regenerating Identity' : 'Importing Identity';
+    const successTitle = state.flow === 'regenerate' ? 'Identity Regenerated' : 'Identity Imported';
+    const failureTitle = state.flow === 'regenerate' ? 'Identity Regeneration Failed' : 'Identity Import Failed';
+
+    let body;
+    let footer;
+
+    if (state.kind === 'progress') {
+      body = html`
+        <div style="font-size: 13px; color: var(--secondary-text-color); margin-bottom: 16px;">
+          This typically takes 5–10 seconds. Please don't close this dialog.
+        </div>
+        <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px;">
+          ${IDENTITY_FLOW_STEP_ORDER.map((entry) => {
+            const isCompleted = state.completedSteps.has(entry.step);
+            const isCurrent = state.currentStep === entry.step;
+            let icon = '○';
+            let color = 'var(--secondary-text-color)';
+            if (isCompleted) {
+              icon = '✓';
+              color = 'var(--success-color, #28a745)';
+            } else if (isCurrent) {
+              icon = '⏳';
+              color = 'var(--primary-color)';
+            }
+            return html`
+              <li style="display: flex; align-items: center; gap: 8px; color: ${color}; font-size: 14px;">
+                <span style="font-family: monospace; width: 1em;">${icon}</span>
+                <span>${entry.label}</span>
+              </li>
+            `;
+          })}
+        </ul>
+      `;
+      footer = nothing; // No Close button while in-flight.
+    } else if (state.kind === 'success') {
+      body = html`
+        <div style="font-size: 32px; text-align: center; margin-bottom: 8px;">✅</div>
+        <div style="font-size: 14px; margin-bottom: 16px;">
+          The device's identity has been replaced and verified.
+        </div>
+        <div style="font-family: monospace; font-size: 12px; background: var(--card-background-color, #f5f5f5); padding: 8px 12px; border-radius: 4px; margin-bottom: 12px;">
+          <div><span style="color: var(--secondary-text-color);">Old key:</span> ${state.oldPubkey.slice(0, 12)}…</div>
+          <div><span style="color: var(--secondary-text-color);">New key:</span> ${state.newPubkey.slice(0, 12)}… <span style="color: var(--success-color, #28a745); font-size: 11px;">(verified after reload)</span></div>
+        </div>
+        ${state.warning ? html`
+          <div style="font-size: 13px; color: var(--secondary-text-color); margin-top: 12px; padding: 8px 12px; border-left: 3px solid var(--warning-color, #f0ad4e); background: var(--warning-color-bg, rgba(240, 173, 78, 0.08));">
+            <strong>Follow-up:</strong>
+            <ul style="margin: 4px 0 0 16px; padding: 0;">
+              <li>${state.warning}</li>
+              <li>Check Settings → Repairs for the entity-ID migration list.</li>
+            </ul>
+          </div>
+        ` : nothing}
+      `;
+      footer = html`
+        <button class="modal-action" @click=${this._closeIdentityFlowModal}>Close</button>
+      `;
+    } else {
+      // failure
+      body = html`
+        <div style="font-size: 32px; text-align: center; margin-bottom: 8px;">❌</div>
+        <div style="font-size: 14px; margin-bottom: 12px;">
+          ${state.flow === 'regenerate'
+            ? 'The device firmware rejected the new key. Your device identity is unchanged.'
+            : 'The import did not take effect. Your device identity may be unchanged.'}
+        </div>
+        <div style="font-family: monospace; font-size: 12px; background: var(--card-background-color, #f5f5f5); padding: 8px 12px; border-radius: 4px;">
+          <div><span style="color: var(--secondary-text-color);">Error code:</span> ${state.code}</div>
+          <div style="margin-top: 4px; word-break: break-word;"><span style="color: var(--secondary-text-color);">Message:</span> ${state.message}</div>
+        </div>
+      `;
+      footer = html`
+        <button class="modal-action" @click=${this._closeIdentityFlowModal}>Close</button>
+      `;
+    }
+
+    const headerTitle =
+      state.kind === 'progress' ? inFlightTitle :
+      state.kind === 'success' ? successTitle : failureTitle;
+
+    return html`
+      <div class="modal-overlay">
+        <div class="modal-card" data-a11y="identity-flow"
+             role="dialog" aria-modal="true" aria-label=${flowLabel}
+             style="max-width: 480px;"
+             @click=${(e: Event) => e.stopPropagation()}>
+          <div class="modal-header">
+            <span class="modal-title">${headerTitle}</span>
+            ${state.kind === 'progress' ? nothing : html`
+              <button class="modal-close" aria-label="Close" @click=${this._closeIdentityFlowModal}>&times;</button>
+            `}
+          </div>
+          <div class="modal-body" style="padding: 20px;">
+            ${body}
+            ${footer ? html`<div style="margin-top: 20px; display: flex; justify-content: flex-end;">${footer}</div>` : nothing}
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   private async _onConfirmAction() {

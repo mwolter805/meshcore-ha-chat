@@ -6,6 +6,11 @@ __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
 
+# Test venv (per CLAUDE.md "Python Tests (meshcore-ha-chat)" — uv-managed,
+# rebuildable via `uv venv --python 3.14 .venv && .venv/bin/pip install
+# pytest-homeassistant-custom-component`).
+.venv/
+
 # Test coverage
 .coverage
 .coverage.*

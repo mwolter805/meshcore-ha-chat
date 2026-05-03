@@ -17,6 +17,20 @@ export interface HomeAssistant {
       callback: (event: HassEvent) => void,
       eventType: string,
     ) => Promise<() => void>;
+    /**
+     * Generic streaming-WS subscription. The backend handler emits
+     * ``websocket_api.event_message`` payloads (each delivered to
+     * ``callback``) and terminates with ``send_result`` (Promise
+     * resolves to the unsubscribe fn — note: ``send_result`` payload
+     * is NOT exposed to the caller; deliver terminal data via a final
+     * event_message) or ``send_error`` (Promise rejects with
+     * ``{code, message}``). See
+     * ``home-assistant-js-websocket/lib/connection.ts``.
+     */
+    subscribeMessage: <EventType>(
+      callback: (event: EventType) => void,
+      msg: Record<string, unknown>,
+    ) => Promise<() => void>;
   };
   themes: {
     darkMode: boolean;

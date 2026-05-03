@@ -55,6 +55,18 @@
     },
     "no_meshcore_coordinator": {
       "message": "No active MeshCore coordinator"
+    },
+    "invalid_key_length": {
+      "message": "Private key must be 64 or 128 hex characters"
+    },
+    "invalid_key_hex": {
+      "message": "Private key must contain only hex characters (0-9, a-f)"
+    },
+    "import_rejected": {
+      "message": "The device firmware rejected the new identity. The device's identity is unchanged."
+    },
+    "verify_failed": {
+      "message": "The new identity did not take effect on the device. The device's identity may be unchanged."
     }
   }
 }

@@ -499,24 +499,140 @@ export async function markConversationRead(
 
 // ─── Identity Management ─────────────────────────────────────────────────
 
-export async function regenerateIdentity(
-  hass: HomeAssistant, entryId?: string,
-): Promise<{ success: boolean; new_pubkey?: string; warning?: string }> {
-  try {
-    const msg: Record<string, unknown> = { type: 'meshcore_chat/regenerate_identity' };
-    if (entryId) msg.entry_id = entryId;
-    return await hass.callWS<{ success: boolean; new_pubkey?: string; warning?: string }>(msg);
-  } catch { return { success: false }; }
+/**
+ * Streaming-progress identity flow (Phase 1.1).
+ *
+ * The chat backend's ``ws_regenerate_identity`` / ``ws_import_identity``
+ * handlers emit one ``event_message`` per step (generating →
+ * importing → rebooting → reconnecting → reloading → verifying →
+ * done) before terminating with ``send_result`` on success or
+ * ``send_error`` on failure. The terminal success data rides on the
+ * final ``done`` event because ``home-assistant-js-websocket``'s
+ * ``subscribeMessage`` promise resolves to the unsubscribe handle only
+ * and discards ``send_result`` payloads.
+ *
+ * The wrapper translates the wire shapes into a typed
+ * ``IdentityFlowEvent`` enum so the modal component doesn't have to
+ * touch transport details.
+ */
+
+export type IdentityFlowStep =
+  | 'generating'
+  | 'importing'
+  | 'rebooting'
+  | 'reconnecting'
+  | 'reloading'
+  | 'verifying'
+  | 'done';
+
+export interface IdentityFlowResult {
+  success: true;
+  old_pubkey: string;
+  new_pubkey: string;
+  warning?: string;
 }
 
-export async function importIdentity(
-  hass: HomeAssistant, privateKey: string, entryId?: string,
-): Promise<{ success: boolean; pubkey?: string }> {
-  try {
-    const msg: Record<string, unknown> = { type: 'meshcore_chat/import_identity', private_key: privateKey };
-    if (entryId) msg.entry_id = entryId;
-    return await hass.callWS<{ success: boolean; pubkey?: string }>(msg);
-  } catch { return { success: false }; }
+export interface IdentityFlowError {
+  success: false;
+  /** WS error code from the backend, e.g. ``import_rejected`` or ``verify_failed``. */
+  code: string;
+  /** Human-readable error message from the backend. */
+  message: string;
+}
+
+export type IdentityFlowEvent =
+  | { type: 'progress'; step: Exclude<IdentityFlowStep, 'done'> }
+  | { type: 'result'; data: IdentityFlowResult }
+  | { type: 'error'; data: IdentityFlowError };
+
+/** Raw event-message payload shape pushed by the backend over the WS subscription. */
+interface IdentityFlowWireEvent {
+  step: IdentityFlowStep;
+  success?: boolean;
+  old_pubkey?: string;
+  new_pubkey?: string;
+  warning?: string;
+}
+
+/**
+ * Subscribe to a streaming identity-change WS handler.
+ *
+ * Returns an ``unsubscribe`` function (the backend self-terminates so
+ * calling it is normally a no-op; included for completeness if the
+ * caller wants to abandon the flow early) and a ``done`` Promise that
+ * resolves with either the typed ``IdentityFlowResult`` (success) or
+ * the typed ``IdentityFlowError`` (failure). The Promise never
+ * rejects — caller dispatches on ``data.success`` instead.
+ */
+export function subscribeIdentityChange(
+  hass: HomeAssistant,
+  type: 'meshcore_chat/regenerate_identity' | 'meshcore_chat/import_identity',
+  payload: Record<string, unknown>,
+  onEvent: (e: IdentityFlowEvent) => void,
+): {
+  unsubscribe: () => void;
+  done: Promise<IdentityFlowResult | IdentityFlowError>;
+} {
+  let unsubFn: (() => void) | null = null;
+  let resolveDone!: (v: IdentityFlowResult | IdentityFlowError) => void;
+  const done = new Promise<IdentityFlowResult | IdentityFlowError>((res) => {
+    resolveDone = res;
+  });
+
+  // Default outcome if the subscription terminates cleanly without a
+  // ``done`` event ever arriving — should not happen in practice but
+  // defends against a backend that closes the request before the
+  // terminal event lands. Treated as a verify-failed error so the UI
+  // surfaces something rather than hanging.
+  let terminal: IdentityFlowResult | IdentityFlowError = {
+    success: false,
+    code: 'unknown',
+    message: 'Identity flow terminated without a result event.',
+  };
+
+  const subscribePromise = hass.connection.subscribeMessage<IdentityFlowWireEvent>(
+    (msg) => {
+      if (msg.step === 'done' && msg.success && msg.old_pubkey && msg.new_pubkey) {
+        const result: IdentityFlowResult = {
+          success: true,
+          old_pubkey: msg.old_pubkey,
+          new_pubkey: msg.new_pubkey,
+          warning: msg.warning,
+        };
+        terminal = result;
+        onEvent({ type: 'result', data: result });
+      } else if (msg.step !== 'done') {
+        onEvent({ type: 'progress', step: msg.step });
+      }
+    },
+    { type, ...payload },
+  );
+
+  subscribePromise
+    .then((unsub) => {
+      unsubFn = unsub;
+      // Backend self-terminated with send_result — the typed
+      // ``terminal`` value was already populated by the ``done`` event.
+      resolveDone(terminal);
+    })
+    .catch((err: { code?: string; message?: string }) => {
+      const errorData: IdentityFlowError = {
+        success: false,
+        code: err.code || 'error',
+        message: err.message || 'Identity flow failed.',
+      };
+      onEvent({ type: 'error', data: errorData });
+      resolveDone(errorData);
+    });
+
+  return {
+    unsubscribe: () => {
+      if (unsubFn) {
+        unsubFn();
+      }
+    },
+    done,
+  };
 }
 
 // ─── Location Source ─────────────────────────────────────────────────────
