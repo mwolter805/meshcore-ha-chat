@@ -38,6 +38,10 @@
           }
         }
       }
+    },
+    "name_changed": {
+      "title": "MeshCore device renamed",
+      "description": "The MeshCore device was renamed from `{old_name}` to `{new_name}`. {count} entity IDs were automatically migrated from the `_{old_suffix}` suffix to `_{new_suffix}`.\n\n**Renamed entities:**\n\n{entity_list}\n\nIf you have automations, scripts, or dashboards referencing the old entity IDs, you will need to update them manually to use the new suffix.\n\nThis issue can be dismissed once you have verified your configuration."
     }
   },
   "exceptions": {

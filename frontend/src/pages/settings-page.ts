@@ -8,7 +8,7 @@ import {
   subscribeIdentityChange,
   setLocationSource,
 } from '../api';
-import type { IdentityFlowStep } from '../api';
+import type { IdentityFlowStep, SetDeviceConfigRenameResult } from '../api';
 import '../components/confirm-dialog';
 import '../components/command-dialog';
 import '../components/sensor-tile';
@@ -120,6 +120,13 @@ export class SettingsPage extends LitElement {
   @state() private _identityFlowState: IdentityFlowState = { kind: 'closed' };
   private _identityFlowUnsubscribe: (() => void) | null = null;
 
+  // Phase 2 v4 — post-rename persistent dialog. Toast was too easy to
+  // miss for an op that rewrites N entity_ids and triggers a
+  // config-entry reload. When set, the panel renders a modal the user
+  // must explicitly close; on close, we refresh device config so the
+  // panel reflects the new name immediately.
+  @state() private _renameSuccess: SetDeviceConfigRenameResult | null = null;
+
   // Hidden sensors modal
   @state() private _hiddenSensorsModalKey: string | null = null;
 
@@ -165,6 +172,13 @@ export class SettingsPage extends LitElement {
         }
       },
       getScope: () => this.shadowRoot?.querySelector('[data-a11y="identity-flow"]'),
+    });
+    // Phase 2 v4 — rename success modal: focus-trap, Escape closes
+    // and triggers the same refresh path as the Close button.
+    attachDialogA11y(this, {
+      isOpen: () => this._renameSuccess !== null,
+      onEscape: () => this._closeRenameSuccessModal(),
+      getScope: () => this.shadowRoot?.querySelector('[data-a11y="rename-success"]'),
     });
   }
 
@@ -863,6 +877,9 @@ export class SettingsPage extends LitElement {
       <!-- Identity Flow Modal (Phase 1.1 streaming progress) -->
       ${this._renderIdentityFlowModal()}
 
+      <!-- Rename Success Modal (Phase 2 v4 — persistent dialog) -->
+      ${this._renderRenameSuccessModal()}
+
       <!-- Status Toast -->
       ${this._statusMessage ? html`
         <div class="status-toast ${this._statusMessage.type}">
@@ -906,7 +923,7 @@ export class SettingsPage extends LitElement {
         <div class="companion-header">
           <div class="section-title">
             <div class="section-icon companion">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6.05 4.14l-.39-.39c-.39-.39-1.02-.39-1.41 0l-.01.01c-.39.39-.39 1.02 0 1.41l.39.39c.39.39 1.03.39 1.42 0 .39-.39.39-1.03 0-1.42zm12.3-.01c-.39-.39-1.02-.39-1.41 0l-.38.38c-.39.39-.39 1.03 0 1.42.39.39 1.02.39 1.41 0l.38-.38c.4-.4.4-1.03.01-1.42zM12 4c.55 0 1-.45 1-1V1c0-.55-.45-1-1-1s-1 .45-1 1v2c0 .55.45 1 1 1zm-1 11h2v2h-2v-2zm7-5c0 3.87-3.13 7-7 7s-7-3.13-7-7 3.13-7 7-7 7 3.13 7 7z"/></svg>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9,2A1,1 0 0,0 8,3C8,8.67 8,14.33 8,20C8,21.11 8.89,22 10,22H15C16.11,22 17,21.11 17,20V9C17,7.89 16.11,7 15,7H10V3A1,1 0 0,0 9,2M10,9H15V13H10V9Z"/></svg>
             </div>
             <div>
               <div class="device-name">${d.name}</div>
@@ -1346,8 +1363,17 @@ export class SettingsPage extends LitElement {
         }
         this._editValues = { ...this._editValues };
 
-        // Show success toast
-        this._showStatusMessage(`Saved: ${keysToApply.join(', ')}`, 'success');
+        if (result.rename) {
+          // Phase 2 v4: rename triggers a persistent post-rename dialog
+          // with old/new names + suffix + count. Toast is too easy to
+          // miss for an op that rewrites N entity_ids and reloads the
+          // integration. The Close handler refreshes _deviceConfig so
+          // the page shows the new name immediately.
+          this._renameSuccess = result.rename;
+        } else {
+          // Non-rename saves keep the existing toast UX.
+          this._showStatusMessage(`Saved: ${keysToApply.join(', ')}`, 'success');
+        }
       } else {
         this._showStatusMessage('Save failed', 'error');
       }
@@ -1378,10 +1404,24 @@ export class SettingsPage extends LitElement {
 
   private _handleNameSave() {
     const newName = this._editValues['name'];
-    if (newName === undefined || newName === this._deviceConfig?.name) return;
+    const oldName = this._deviceConfig?.name;
+    if (newName === undefined || newName === oldName) return;
+    // Phase 2 (F06): the dialog now describes what the migration
+    // actually does. Server-side `_migrate_entity_ids_name_suffix` in
+    // ws_api.py rewrites entity_ids ending in `_<sanitized-old>` to end
+    // in `_<sanitized-new>`. The local `sanitize` mirror approximates
+    // meshcore-ha's `utils.py:sanitize_name` closely enough for the
+    // preview — the server-side migration uses the canonical sanitize.
+    const sanitize = (s: string) =>
+      (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const oldSuffix = sanitize(oldName ?? '');
+    const newSuffix = sanitize(String(newName));
     this._confirmAction = {
       title: 'Rename Device',
-      message: 'Changing the device name will change all entity IDs for this device. Any automations, scripts, or dashboards referencing current entity IDs will need to be updated. Continue?',
+      message:
+        `Renaming the device will rename all entity IDs ending in _${oldSuffix} to _${newSuffix}. ` +
+        `Any automations, scripts, or dashboards referencing entity IDs by the old name will need updating. ` +
+        `A repair issue will list every renamed entity. Continue?`,
       onConfirm: async () => {
         await this._handleApply('device-name');
       },
@@ -1709,6 +1749,76 @@ export class SettingsPage extends LitElement {
           <div class="modal-body" style="padding: 20px;">
             ${body}
             ${footer ? html`<div style="margin-top: 20px; display: flex; justify-content: flex-end;">${footer}</div>` : nothing}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private _closeRenameSuccessModal() {
+    // Clear the modal state and refresh the device config so the
+    // settings page's "Device Name" input reflects the new value.
+    this._renameSuccess = null;
+    void this._loadDeviceConfig();
+    // The companion-card title elsewhere on this page (and the
+    // panel's header) reads from `selectedDevice.name`, which is
+    // owned by the parent panel's `_devices` array — NOT from
+    // `_deviceConfig`. Notify the parent so it can re-fetch
+    // `getDevices(...)` and refresh `_devices` (which makes the
+    // computed `_selectedDevice` reflect the new name).
+    this.dispatchEvent(
+      new CustomEvent('device-renamed', { bubbles: true, composed: true }),
+    );
+  }
+
+  private _renderRenameSuccessModal() {
+    const r = this._renameSuccess;
+    if (!r) return nothing;
+
+    // Uses the canonical `.dialog-*` pattern (same as
+    // `meshcore-confirm-dialog`) rather than the `.modal-*` pattern
+    // (which is for full-width left-aligned menu-list items, e.g.
+    // the Companion Settings overflow menu). Visual consistency
+    // with the rename CONFIRM dialog the user just clicked through.
+    //
+    // Body matches the `name_changed` repair-issue text minus the
+    // bullet list of (old_id → new_id) pairs — that list lives in
+    // Settings → Repairs (one issue per rename, timestamped) and
+    // would dwarf the dialog.
+    return html`
+      <div class="dialog-overlay">
+        <div class="dialog"
+             role="dialog" aria-modal="true" aria-label="Device renamed"
+             data-a11y="rename-success"
+             @click=${(e: Event) => e.stopPropagation()}>
+          <div class="dialog-header">
+            <div class="dialog-header-title">Device renamed</div>
+          </div>
+          <div class="dialog-body">
+            <p style="margin: 0 0 12px 0;">
+              The MeshCore device was renamed from
+              <code>${r.old_name}</code> to <code>${r.new_name}</code>.
+            </p>
+            <p style="margin: 0 0 12px 0;">
+              ${r.count}
+              ${r.count === 1 ? 'entity ID was' : 'entity IDs were'}
+              automatically migrated from the
+              <code>_${r.old_suffix}</code> suffix to
+              <code>_${r.new_suffix}</code>.
+            </p>
+            <p style="margin: 0 0 12px 0;">
+              If you have automations, scripts, or dashboards
+              referencing the old entity IDs, you will need to
+              update them manually to use the new suffix.
+            </p>
+            <p style="margin: 0; color: var(--secondary-text-color); font-size: 13px;">
+              The full list of renamed entity IDs is available in
+              Settings → Repairs.
+            </p>
+          </div>
+          <div class="dialog-footer">
+            <button class="dialog-button primary"
+                    @click=${this._closeRenameSuccessModal}>Close</button>
           </div>
         </div>
       </div>

@@ -23,9 +23,16 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
 from . import MeshCoreChatRuntimeData, _sync_upstream_repair_issue
-from .const import DOMAIN, MESHCORE_DOMAIN, ENTITY_DOMAIN_BINARY_SENSOR
+from .const import (
+    CONF_NAME_UPSTREAM,
+    DOMAIN,
+    ENTITY_DOMAIN_BINARY_SENSOR,
+    MESHCORE_DOMAIN,
+)
 from .message_store import MessageStore
 from .utils import format_entity_id, sanitize_name
 
@@ -844,6 +851,85 @@ def ws_get_device_config(hass, connection, msg):
 # Write companion device settings
 
 
+class RenameError(Exception):
+    """Raised when the device firmware rejects a ``set_name`` command.
+
+    Mirrors :class:`IdentityImportError` but for the rename path. Carries
+    the firmware-reported error code (e.g. ``firmware rejected new name:
+    ERR_CODE_ILLEGAL_ARG``). Surfaced via
+    ``connection.send_error(..., "rename_rejected", str(ex))`` so the
+    frontend gets the actual rejection reason instead of a generic
+    "Operation failed" via ``_ws_send_error_safe``'s default mapping.
+
+    Phase 2 — proposal §"Phase 2 — alignment with Phase 1.1": Phase 1.1's
+    direct-SDK + ``EventType.ERROR``-check pattern is mirrored here on
+    the rename path so the same F10-class silent-success-on-firmware-error
+    issue cannot recur. Forensics: §F06 + §2b.
+    """
+
+
+def _migrate_entity_ids_name_suffix(
+    hass: HomeAssistant,
+    meshcore_entry_id: str,
+    old_suffix: str,
+    new_suffix: str,
+) -> list[tuple[str, str]]:
+    """Rewrite entity_ids ending in ``_{old_suffix}`` to end in ``_{new_suffix}``.
+
+    Walks the HA entity registry, filters by the meshcore
+    ``config_entry_id``, and rewrites ``entity_id`` via
+    ``entity_registry.async_update_entity``. Returns a list of
+    ``(old_entity_id, new_entity_id)`` pairs for every successful
+    rewrite — caller uses this to populate the ``entity_list``
+    placeholder of the ``name_changed`` repair issue so the user can
+    see exactly which entity_ids changed.
+
+    Companion to PR #169's ``_migrate_entity_ids`` in ``meshcore-ha`` —
+    same pattern, but operates on the trailing **name suffix** (where
+    ``set_name`` impacts entity_ids per ``utils.py:format_entity_id``)
+    instead of the leading **pubkey prefix** (where
+    ``import_private_key`` impacts entity_ids). The two migrations are
+    independent and never conflict.
+
+    Idempotent on identical or empty suffixes (no mutations, returns
+    empty list). Errors on individual entities are logged and
+    swallowed — one bad entity should not abort the whole migration.
+
+    Forensics: §F06 + §2b.
+    """
+    if not old_suffix or not new_suffix or old_suffix == new_suffix:
+        return []
+    registry = er.async_get(hass)
+    old_tail = f"_{old_suffix}"
+    new_tail = f"_{new_suffix}"
+    migrated: list[tuple[str, str]] = []
+    for entity in list(registry.entities.values()):
+        if entity.config_entry_id != meshcore_entry_id:
+            continue
+        if not entity.entity_id.endswith(old_tail):
+            continue
+        old_entity_id = entity.entity_id
+        new_entity_id = old_entity_id[: -len(old_tail)] + new_tail
+        try:
+            registry.async_update_entity(
+                old_entity_id, new_entity_id=new_entity_id
+            )
+            _LOGGER.info(
+                "Migrated entity_id: %s -> %s",
+                old_entity_id, new_entity_id,
+            )
+            migrated.append((old_entity_id, new_entity_id))
+        except Exception as ex:  # pragma: no cover - defensive
+            _LOGGER.error(
+                "Failed to migrate entity %s: %s", old_entity_id, ex
+            )
+    _LOGGER.info(
+        "Migrated %d entity_id(s): _%s -> _%s",
+        len(migrated), old_suffix, new_suffix,
+    )
+    return migrated
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "meshcore_chat/set_device_config",
@@ -864,10 +950,154 @@ async def ws_set_device_config(hass, connection, msg):
     changed = []
 
     try:
-        # Handle name setting
+        # Handle name setting (with entity_id migration — F06 fix per Phase 2).
         if "name" in settings:
-            await coordinator.api.mesh_core.commands.set_name(settings["name"])
+            new_name = settings["name"]
+            old_name = coordinator.name or ""
+            meshcore_entry = hass.config_entries.async_get_entry(
+                coordinator.config_entry.entry_id
+            )
+
+            # Direct SDK call + EventType.ERROR check (mirrors Phase 1.1's
+            # `_do_identity_change` — proposal §"Phase 2 — alignment with
+            # Phase 1.1"). Avoids the F10-class silent-success-on-firmware-
+            # error path that would otherwise let a rejected rename look
+            # like a successful one to the user.
+            #
+            # The `EventType` import is lazy so SDK-level failures
+            # (ConnectionError, TimeoutError, etc.) raised by `set_name`
+            # propagate through the outer `except` without first
+            # tripping a missing-meshcore-package import in test envs.
+            result = await coordinator.api.mesh_core.commands.set_name(new_name)
+            # Short-circuit None first so we don't need the meshcore.events
+            # import on the never-responded path (defensive: lets tests
+            # exercise the no-Event case without the patched_event_type
+            # fixture).
+            if result is None:
+                raise RenameError("firmware rejected new name: unknown")
+            from meshcore.events import EventType
+            if getattr(result, "type", None) == EventType.ERROR:
+                payload = getattr(result, "payload", None) or {}
+                code = (
+                    payload.get("code_string")
+                    or payload.get("error_code")
+                    or "unknown"
+                )
+                raise RenameError(f"firmware rejected new name: {code}")
             changed.append("name")
+
+            # Run the migration only if the name actually changed and we
+            # resolved the upstream meshcore config entry. The reload at
+            # the end re-inits the coordinator with the new CONF_NAME —
+            # `coordinator.name` (set-once at construction per
+            # `coordinator.py:104`) ends up correct after the reload.
+            if new_name != old_name and meshcore_entry:
+                # Order: registry rewrite → entry-data update → repair
+                # issue → reload. Reverse order would silently no-op the
+                # migration: HA matches by unique_id during entity
+                # re-registration on reload, finds the OLD entity_id in
+                # the registry, and preserves it (proposal §2b "Order
+                # matters").
+                old_suffix = sanitize_name(old_name)
+                new_suffix = sanitize_name(new_name)
+                migrated_pairs = _migrate_entity_ids_name_suffix(
+                    hass,
+                    meshcore_entry.entry_id,
+                    old_suffix,
+                    new_suffix,
+                )
+                hass.config_entries.async_update_entry(
+                    meshcore_entry,
+                    data={**meshcore_entry.data, CONF_NAME_UPSTREAM: new_name},
+                )
+                if migrated_pairs:
+                    # Markdown bullet list of every (old_id → new_id)
+                    # pair so the repair issue surfaces a complete
+                    # search-replace target list to the user.
+                    entity_list = "\n".join(
+                        f"- `{old_id}` → `{new_id}`"
+                        for old_id, new_id in migrated_pairs
+                    )
+                    # Unique issue_id per rename event so each rename
+                    # becomes its own audit-trail entry. The earlier
+                    # design (Phase 2 v1/v2: issue_id keyed only on
+                    # entry_id) was idempotent on
+                    # ``(domain, issue_id)`` — but HA's
+                    # ``async_create_issue`` preserves the
+                    # ``dismissed_version`` flag across overwrites,
+                    # so once the user dismissed any rename's issue
+                    # all subsequent renames silently wrote into a
+                    # dismissed shell. With a timestamped
+                    # issue_id, every rename surfaces a fresh,
+                    # un-dismissed event the user can act on or
+                    # dismiss individually.
+                    rename_ts = int(time.time())
+                    issue_id = (
+                        f"name_changed_{meshcore_entry.entry_id}_{rename_ts}"
+                    )
+                    ir.async_create_issue(
+                        hass,
+                        DOMAIN,
+                        issue_id,
+                        is_fixable=False,
+                        is_persistent=True,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key="name_changed",
+                        translation_placeholders={
+                            # Raw human-readable names for the prose.
+                            "old_name": old_name,
+                            "new_name": new_name,
+                            # Sanitized suffixes — what actually
+                            # appears in entity_ids. The earlier bug
+                            # (Phase 2 v1) used `_{old_name}` /
+                            # `_{new_name}` which rendered as
+                            # `_MattDub` / `_Test Rename` instead of
+                            # the real `_mattdub` / `_test_rename`.
+                            "old_suffix": old_suffix,
+                            "new_suffix": new_suffix,
+                            "count": str(len(migrated_pairs)),
+                            "entity_list": entity_list,
+                        },
+                    )
+                # Reload triggers meshcore's `async_setup_entry` which
+                # reconstructs `coordinator.name` and `device_info` from
+                # the updated entry data.
+                #
+                # R3 outcome: meshcore-ha registers an
+                # `entry.add_update_listener(async_update_options)` at
+                # `__init__.py:473` that also calls `async_reload` on
+                # data changes. HA's per-entry `setup_lock` serializes
+                # the listener-driven reload behind ours; net effect is
+                # one redundant reload per rename (~1s extra latency,
+                # idempotent). Acceptable for an infrequent rename op.
+                await hass.config_entries.async_reload(meshcore_entry.entry_id)
+                # The reload reconstructed the coordinator + entities;
+                # the post-loop self_info refresh below would run
+                # against the soon-to-be-discarded coord. Skip it.
+                #
+                # The `rename` block carries the migration summary back
+                # to the panel so it can render the post-rename
+                # persistent dialog (matches the repair-issue text
+                # minus the bullet list — that's already in
+                # Settings → Repairs and would dwarf the dialog).
+                # Toast alone was too easy to miss for an op that
+                # rewrites 12+ entity_ids and triggers an integration
+                # reload (Phase 2 v4 user-feedback follow-up).
+                connection.send_result(
+                    msg["id"],
+                    {
+                        "success": True,
+                        "changed": changed,
+                        "rename": {
+                            "old_name": old_name,
+                            "new_name": new_name,
+                            "old_suffix": old_suffix,
+                            "new_suffix": new_suffix,
+                            "count": len(migrated_pairs),
+                        },
+                    },
+                )
+                return
 
         # Handle tx_power setting
         if "tx_power" in settings:
@@ -911,6 +1141,11 @@ async def ws_set_device_config(hass, connection, msg):
                 _LOGGER.warning("Failed to refresh self_info after set_device_config")
 
         connection.send_result(msg["id"], {"success": True, "changed": changed})
+    except RenameError as ex:
+        # Surface the firmware-reported rejection text directly so the
+        # user sees the actual reason (mirrors Phase 1.1's `import_rejected`
+        # surface for `IdentityImportError`).
+        connection.send_error(msg["id"], "rename_rejected", str(ex))
     except Exception as ex:
         _ws_send_error_safe(
             connection, msg["id"], ex, handler="ws_set_device_config"

@@ -138,22 +138,44 @@ export async function getDeviceConfig(
 }
 
 /**
+ * Phase 2 v4: when a `name` change goes through the rename-migration
+ * branch (new_name != old_name + meshcore entry resolved), the WS
+ * handler returns a `rename` block summarizing the migration so the
+ * panel can render a persistent post-rename dialog. Absent for
+ * non-name settings, same-name renames, and rejected/error renames.
+ */
+export interface SetDeviceConfigRenameResult {
+  old_name: string;
+  new_name: string;
+  /** Sanitized form of old_name — what actually appears in entity_ids. */
+  old_suffix: string;
+  /** Sanitized form of new_name — what actually appears in entity_ids. */
+  new_suffix: string;
+  /** Count of entity_ids the migration helper rewrote (>= 0). */
+  count: number;
+}
+
+export interface SetDeviceConfigResponse {
+  success: boolean;
+  changed: string[];
+  rename?: SetDeviceConfigRenameResult;
+}
+
+/**
  * Set device configuration
  */
 export async function setDeviceConfig(
   hass: HomeAssistant,
   settings: Record<string, unknown>,
   entryId?: string,
-): Promise<{ success: boolean; changed: string[] }> {
+): Promise<SetDeviceConfigResponse> {
   try {
     const msg: Record<string, unknown> = {
       type: 'meshcore_chat/set_device_config',
       settings,
     };
     if (entryId) msg.entry_id = entryId;
-    const result = await hass.callWS<{ success: boolean; changed: string[] }>(
-      msg,
-    );
+    const result = await hass.callWS<SetDeviceConfigResponse>(msg);
     return result;
   } catch {
     return { success: false, changed: [] };

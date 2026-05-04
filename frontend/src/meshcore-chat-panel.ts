@@ -608,7 +608,8 @@ export class MeshCorePanel extends LitElement {
             .config=${this._config}
             .selectedDevice=${this._selectedDevice}
             .narrow=${this.narrow}
-            @companion-trace-requested=${this._onCompanionTraceRequested}></meshcore-settings-page>`;
+            @companion-trace-requested=${this._onCompanionTraceRequested}
+            @device-renamed=${this._onDeviceRenamed}></meshcore-settings-page>`;
     }
   }
 
@@ -739,6 +740,33 @@ export class MeshCorePanel extends LitElement {
 
   private _onActiveEntityChanged(e: CustomEvent) {
     this._activeChatEntityId = e.detail?.entityId || null;
+  }
+
+  /**
+   * Phase 2 v5: handle the `device-renamed` event from the settings
+   * page's post-rename modal. Re-fetch `getDevices(...)` so
+   * `_devices` (and the computed `_selectedDevice`) reflect the new
+   * companion name immediately, and re-derive `_config.node_name`
+   * (used by the panel header). The settings page itself already
+   * refreshes its own `_deviceConfig` for the form input — this
+   * handler covers the panel-owned surfaces.
+   */
+  private async _onDeviceRenamed() {
+    if (!this.hass) return;
+    try {
+      this._devices = await getDevices(this.hass);
+      const device = this._selectedDevice;
+      if (device && this._config) {
+        this._config = {
+          ...this._config,
+          node_name: device.name,
+          node_prefix: device.pubkey_prefix?.substring(0, 6) || '',
+          entry_id: device.entry_id,
+        };
+      }
+    } catch (err) {
+      console.error('Failed to refresh devices after rename:', err);
+    }
   }
 
   private async _loadUnreadCounts() {

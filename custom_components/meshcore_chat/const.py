@@ -13,6 +13,16 @@ DOMAIN: Final = "meshcore_chat"
 # data namespace, only as a reference to the producer.
 MESHCORE_DOMAIN: Final = "meshcore"
 
+# Upstream meshcore config-entry data key for the companion device name.
+# Mirrors meshcore-ha/custom_components/meshcore/const.py:CONF_NAME (literal "name").
+# Lifted as a literal here to avoid importing from the upstream package, so the
+# chat addon stays self-contained for HACS distribution. If meshcore-ha ever
+# changes this key, both this constant and our rename-migration logic in
+# `ws_set_device_config` (Phase 2 — F06) break together — see
+# `_migrate_entity_ids_name_suffix` and the `name` branch of
+# `ws_set_device_config` in ws_api.py.
+CONF_NAME_UPSTREAM: Final = "name"
+
 # Events fired on hass.bus by the upstream meshcore integration that we
 # subscribe to from __init__.py.
 EVENT_MESHCORE_MESSAGE: Final = "meshcore_message"
