@@ -180,6 +180,108 @@ async def test_store_message_dedupes_by_id(store: MessageStore) -> None:
     assert len(cached) == 1
 
 
+async def test_store_message_sorts_by_timestamp(
+    store: MessageStore,
+) -> None:
+    """Messages stored out of order land in chronological position.
+
+    Drift fix (Change 0 of "Last-Read Anchor and Read-Receipt
+    Refinement for Chat Panel"). Real-world trigger: a delayed mesh
+    event arrives after a more recent event has already been stored.
+    Without bisect-insert, ``messages[-1]`` would be the most-recently-
+    inserted message rather than the chronologically newest, breaking
+    cursor / lazy-load semantics added in Phases 1+.
+    """
+    eid = "binary_sensor.drift"
+    await store.store_message(
+        eid,
+        {"id": "t0", "timestamp": "2026-05-01T10:00:00", "sender": "x", "text": "first"},
+    )
+    await store.store_message(
+        eid,
+        {"id": "t2", "timestamp": "2026-05-01T10:02:00", "sender": "x", "text": "third"},
+    )
+    # Delayed event with timestamp BETWEEN the two already-stored.
+    await store.store_message(
+        eid,
+        {"id": "t1", "timestamp": "2026-05-01T10:01:00", "sender": "x", "text": "second"},
+    )
+    cached = await store._ensure_loaded(eid)
+    assert [m["id"] for m in cached] == ["t0", "t1", "t2"]
+
+
+async def test_store_message_dedup_uses_chronological_window(
+    store: MessageStore,
+) -> None:
+    """Dedup window is the newest-50-by-timestamp after Change 0.
+
+    Verifies R6c from the proposal: ``messages[-50:]`` previously meant
+    "the 50 most-recently-inserted records," which could let a duplicate
+    of a delayed event slip through if it arrived after a flood of
+    newer events. Post-Change-0, the dedup window is chronological, so
+    a re-arriving delayed event is still caught.
+
+    Sequence: store A (T0), then B (T-1, simulating a delayed event
+    that lands AFTER A even though its timestamp is OLDER), then A
+    again. Assert the second A is dedupped — i.e., the buffer still
+    contains exactly two records and A is not duplicated.
+    """
+    eid = "binary_sensor.dedup"
+    msg_a = {
+        "id": "a",
+        "timestamp": "2026-05-01T10:00:00",
+        "sender": "x",
+        "text": "alpha",
+    }
+    msg_b_delayed = {
+        "id": "b",
+        "timestamp": "2026-05-01T09:59:00",  # earlier than A
+        "sender": "x",
+        "text": "beta (delayed)",
+    }
+    await store.store_message(eid, msg_a)
+    await store.store_message(eid, msg_b_delayed)
+    # Re-store A — must be dedupped even though B (an older-timestamp
+    # event) was the most recent INSERT.
+    await store.store_message(eid, msg_a)
+    cached = await store._ensure_loaded(eid)
+    assert [m["id"] for m in cached] == ["b", "a"]
+
+
+async def test_get_messages_returns_newest_after_drift(
+    store: MessageStore,
+) -> None:
+    """``get_messages(limit=1)`` returns the chronologically newest record.
+
+    Phase 1 cursor snapshotting (``ws_mark_read``) calls
+    ``get_messages(limit=1)`` to find the newest message ID. After
+    Change 0, that contract holds even when events arrive out of
+    order: ``messages[-limit:]`` is the newest N by timestamp, not by
+    insertion order.
+    """
+    eid = "binary_sensor.newest"
+    await store.store_message(
+        eid,
+        {"id": "t1", "timestamp": "2026-05-01T10:00:00", "sender": "x", "text": "one"},
+    )
+    await store.store_message(
+        eid,
+        {"id": "t3", "timestamp": "2026-05-01T10:02:00", "sender": "x", "text": "three"},
+    )
+    # Delayed event with timestamp BETWEEN t1 and t3 — most recent
+    # insert, but NOT the chronologically newest.
+    await store.store_message(
+        eid,
+        {"id": "t2", "timestamp": "2026-05-01T10:01:00", "sender": "x", "text": "two"},
+    )
+    newest = await store.get_messages(eid, limit=1)
+    assert len(newest) == 1
+    assert newest[0]["id"] == "t3"
+    # Index should also reflect the chronologically newest message.
+    assert store.get_message_index()[eid]["last_message_ts"] == "2026-05-01T10:02:00"
+    assert store.get_message_index()[eid]["last_preview"] == "three"
+
+
 async def test_store_message_fifo_trims_at_max(
     hass: HomeAssistant, config_entry: MockConfigEntry
 ) -> None:

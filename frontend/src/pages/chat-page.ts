@@ -1,10 +1,15 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { HomeAssistant, PanelConfig, Contact, Channel } from '../types';
+import type { HomeAssistant, PanelConfig, Contact, Channel, ChatMessage } from '../types';
 import { MessageStore } from '../chat/message-store';
 import { buildRenderItems } from '../chat/message-parser';
 import { discoverChannelEntity, discoverContactEntity } from '../chat/entity-resolver';
 import { markConversationRead, sendDirectMessage, sendChannelMessage } from '../api';
+import {
+  AT_BOTTOM_THRESHOLD_PX,
+  LAZY_LOAD_TRIGGER_PX,
+  MARK_READ_GRACE_PERIOD_MS,
+} from '../constants';
 import '../components/conversation-list';
 import '../components/manage-dialog';
 import '../components/message-bubble';
@@ -18,6 +23,16 @@ export class ChatPage extends LitElement {
   @property({ type: String }) selectedId: string | null = null;
   @property({ type: Boolean }) narrow = false;
   @property({ type: Object }) unreadCounts: Record<string, number> = {};
+  /**
+   * Phase 4 (Change 9): per-entity "last-read" message-ID cursor map,
+   * sourced from the backend's `meshcore_chat/get_unread_counts`
+   * payload. Used by `_onConversationSelected` to drive anchor-based
+   * open via `MessageStore.switchEntity(entityId, anchor)`, and by
+   * `_renderItemsWithDivider` to position the divider AFTER the anchor
+   * message in the rendered list (first item below the divider = first
+   * unread message).
+   */
+  @property({ type: Object }) lastRead: Record<string, string> = {};
 
   @state() private _messageStore: MessageStore | null = null;
   @state() private _inputText = '';
@@ -36,6 +51,37 @@ export class ChatPage extends LitElement {
   private _lastMessageCount = 0;
   /** Unread count captured at conversation selection time. Used at render time to place divider. */
   private _unreadCountAtSelection = 0;
+  /**
+   * Phase 4 (Change 8b): anchor message-ID captured at conversation
+   * selection time. Drives the anchor-driven divider in
+   * `_renderItemsWithDivider` — the divider renders AFTER the message
+   * with this id, so the first item below the divider is the first
+   * unread message. Falls back to the count-based path when null /
+   * absent from the buffer (fresh-install / pruned-anchor cases).
+   */
+  private _anchorIdAtSelection: string | null = null;
+  /**
+   * Phase 4 (Change 8d, R1): timestamp at which the post-switch grace
+   * period ends. The first auto-mark-read after a conversation switch
+   * is suppressed until `Date.now() >= _markReadGraceUntil`. Subsequent
+   * mark-reads in the same conversation fire without delay. See
+   * `MARK_READ_GRACE_PERIOD_MS` in constants.ts.
+   */
+  private _markReadGraceUntil = 0;
+  /**
+   * Phase 4 fix (Bug #1 — low-unread auto-mark-read): one-shot timer
+   * scheduled at conversation-switch time to re-check at-bottom +
+   * !hasNewerMessages after the R1 grace period elapses. Required
+   * because the divider's scroll-into-view fires its scroll event
+   * INSIDE the grace window — the synchronous mark-read attempt is
+   * suppressed, and no further scroll events fire on their own. This
+   * deferred re-check is what makes the proposal's 8g item ("auto-
+   * mark-read after initial open settles") actually work.
+   *
+   * Cleared on every switchEntity (so a quick conversation flip
+   * cancels the in-flight check) and on disconnectedCallback.
+   */
+  private _postSwitchMarkReadTimer: ReturnType<typeof setTimeout> | null = null;
 
   static styles = css`
     :host {
@@ -346,6 +392,38 @@ export class ChatPage extends LitElement {
       flex-shrink: 0;
       overflow: hidden;
     }
+
+    /* Phase 4 (Change 8f): "↓ N new" indicator. Shown when new messages
+       arrived while scrolled away from the bottom OR when the buffer
+       tail isn't yet the conversation's newest message. Click loads
+       any unloaded newer messages, scrolls to bottom, and fires
+       mark-read. Sticky-positioned at the bottom of the chat
+       container so it sits above the input area while scrolled. */
+    .new-messages-indicator {
+      position: sticky;
+      bottom: 12px;
+      align-self: center;
+      margin: 0 auto;
+      padding: 6px 14px;
+      border: none;
+      border-radius: 16px;
+      background: var(--primary-color, #03a9f4);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      transition: opacity 0.15s, transform 0.15s;
+      z-index: 2;
+    }
+
+    .new-messages-indicator:hover {
+      opacity: 0.92;
+    }
+
+    .new-messages-indicator:active {
+      transform: translateY(1px);
+    }
   `;
 
   /** Treat as narrow when HA says narrow OR when the viewport is < 600px wide. */
@@ -379,6 +457,10 @@ export class ChatPage extends LitElement {
       this._mediaQuery.removeEventListener('change', this._mediaHandler);
       this._mediaQuery = null;
       this._mediaHandler = null;
+    }
+    if (this._postSwitchMarkReadTimer) {
+      clearTimeout(this._postSwitchMarkReadTimer);
+      this._postSwitchMarkReadTimer = null;
     }
   }
 
@@ -418,12 +500,13 @@ export class ChatPage extends LitElement {
       }
       // else: still loading — keep _pendingScroll for the next update cycle
     } else if (this._messageStore) {
-      // Auto-scroll to bottom when new messages arrive, but only if user is near bottom
+      // Phase 4: new messages arriving doesn't auto-mark-read anymore.
+      // _scrollToBottomIfNearEnd is gated on !hasNewerMessages and
+      // user-was-at-bottom; it fires _checkAndMarkReadIfAtBottom itself
+      // when it actually performs the scroll.
       const currentCount = this._messageStore.messages.length;
       if (currentCount > this._lastMessageCount && this._lastMessageCount > 0) {
         this._scrollToBottomIfNearEnd();
-        // New messages arrived while viewing — re-mark as read so badge stays clear
-        this._markActiveRead(this._currentEntityId);
       }
       this._lastMessageCount = currentCount;
     }
@@ -595,6 +678,7 @@ export class ChatPage extends LitElement {
             `
           : html``}
         ${this._renderItemsWithDivider(renderItems)}
+        ${this._renderNewMessagesIndicator()}
       </div>
       <div class="input-area">
         <textarea
@@ -630,14 +714,60 @@ export class ChatPage extends LitElement {
     let messageIdx = 0;
     let dividerInserted = false;
 
-    // Compute divider position at render time from captured unread count.
-    // Count actual message render items (groups), not raw messages, since
-    // messageIdx in the loop counts groups (date separators are skipped).
+    // Phase 4 (Change 8b): anchor-driven divider placement.
+    //
+    // Preferred path: locate the message group whose newest message id
+    // matches `_anchorIdAtSelection`, and insert the divider immediately
+    // AFTER it — so the first item rendered below the divider is the
+    // first unread message. This puts the user's previously-seen
+    // newest message at the top of the viewport with the unread band
+    // flowing down below it.
+    //
+    // Fallback path: when `_anchorIdAtSelection` is null (fresh-install
+    // / never-marked-read / no unread) OR the anchor is not in the
+    // currently rendered buffer (pruned-anchor / not-yet-loaded by
+    // lazy-load), fall back to count-based positioning so the divider
+    // still appears in the right neighborhood. R6b's "no divider" path
+    // is silent — the retry loop in `_doScrollWithRetry` lands the user
+    // at the bottom of the buffer, which is correct for the
+    // anchor-evicted case anyway.
     let dividerAtMessageIdx: number | null = null;
-    if (this._unreadCountAtSelection > 0) {
+    let placeAfterAnchor = false;
+    let anchorGroupIdx: number | null = null;
+    if (this._anchorIdAtSelection) {
+      // Walk message groups (skipping date separators) and check if any
+      // bubble in each group matches the anchor id. The anchor is a
+      // single-message id; it lands in exactly one group.
+      let groupIdx = 0;
+      for (const item of renderItems) {
+        if (item.type === 'date-separator') continue;
+        const messages = item.group?.messages as ChatMessage[] | undefined;
+        if (messages?.some((m) => m.id === this._anchorIdAtSelection)) {
+          anchorGroupIdx = groupIdx;
+          break;
+        }
+        groupIdx++;
+      }
+    }
+    if (anchorGroupIdx !== null) {
+      // Place the divider AFTER the anchor's group — first item below
+      // the divider is the next group, i.e., the first unread.
+      dividerAtMessageIdx = anchorGroupIdx + 1;
+      placeAfterAnchor = true;
+    } else if (this._unreadCountAtSelection > 0) {
+      // Fallback: count-based positioning (pre-Phase-4 behaviour).
       const totalMessageItems = renderItems.filter(item => item.type !== 'date-separator').length;
       const idx = totalMessageItems - this._unreadCountAtSelection;
       dividerAtMessageIdx = idx >= 0 ? idx : 0;
+    }
+
+    // If the anchor is the very last group (no unread after it), don't
+    // render a divider at all — there's nothing on the unread side.
+    if (placeAfterAnchor && dividerAtMessageIdx !== null) {
+      const totalMessageItems = renderItems.filter(item => item.type !== 'date-separator').length;
+      if (dividerAtMessageIdx >= totalMessageItems) {
+        dividerAtMessageIdx = null;
+      }
     }
 
     for (const item of renderItems) {
@@ -669,6 +799,31 @@ export class ChatPage extends LitElement {
     }
 
     return results;
+  }
+
+  /**
+   * Phase 4 (Change 8f): "↓ N new" indicator render.
+   *
+   * Visible when either (a) new realtime arrivals accumulated while the
+   * user was scrolled away from the bottom, OR (b) the buffer tail
+   * isn't yet the conversation's newest message (i.e., the user opened
+   * with an anchor and there are unloaded newer messages on disk). In
+   * case (b) the counter may be 0 — the indicator label falls back to
+   * a bare "↓ new" so the user still has a visible affordance to jump
+   * forward to current messages.
+   */
+  private _renderNewMessagesIndicator() {
+    const store = this._messageStore;
+    if (!store) return html``;
+    const counter = store.newMessagesWhileAway;
+    const hasNewer = store.hasNewerMessages;
+    if (counter === 0 && !hasNewer) return html``;
+    const label = counter > 0 ? `↓ ${counter} new` : `↓ new`;
+    return html`
+      <button class="new-messages-indicator" @click=${this._jumpToBottom}>
+        ${label}
+      </button>
+    `;
   }
 
   private _onConversationSelected() {
@@ -714,16 +869,64 @@ export class ChatPage extends LitElement {
         composed: true,
       }));
 
-      // Determine scroll behavior based on unread count
+      // Phase 4 (Change 8a): determine open behaviour.
+      //
+      // Anchor-driven open: when we have a persisted last-read cursor
+      // for this entity, hand it to the MessageStore so it routes
+      // through `meshcore_chat/get_messages_around` instead of the
+      // newest-50 path. The divider then renders AFTER the anchor in
+      // `_renderItemsWithDivider` (Change 8b), and `_doScrollWithRetry`
+      // scrolls the divider to viewport top — landing the user with
+      // the previously-seen newest message at the top and the unread
+      // band flowing down below it.
+      //
+      // Fallback to the pre-Phase-4 unread-count divider when no
+      // anchor is available (fresh install / never marked read on this
+      // entity).
       const unreadCount = this._getUnreadCountForSelected();
-      this._pendingScroll = unreadCount > 0 ? 'last-read' : 'bottom';
+      const anchor = (entityId && this.lastRead?.[entityId]) || null;
+      this._anchorIdAtSelection = anchor;
       this._unreadCountAtSelection = unreadCount;
+      // Use 'last-read' scroll mode when EITHER the anchor or the
+      // unread count is available — both branches in
+      // _renderItemsWithDivider can produce a divider for that mode.
+      this._pendingScroll = (anchor || unreadCount > 0) ? 'last-read' : 'bottom';
       this._lastMessageCount = 0; // Reset so auto-scroll doesn't trigger during initial load
+      // Phase 4 R1: arm the post-switch grace timer so the first
+      // auto-mark-read after this open is suppressed for
+      // MARK_READ_GRACE_PERIOD_MS. Subsequent mark-reads in this
+      // conversation fire without delay.
+      this._markReadGraceUntil = Date.now() + MARK_READ_GRACE_PERIOD_MS;
 
-      this._messageStore.switchEntity(entityId);
+      // Phase 4 fix (Bug #1): the divider's scroll-into-view fires its
+      // scroll event INSIDE the grace window — the synchronous
+      // mark-read attempt from `_checkAndMarkReadIfAtBottom` gets
+      // suppressed, and no further scroll events fire on their own
+      // until the user scrolls. Without this deferred re-check, a
+      // low-unread open would never advance the cursor, leaving the
+      // sidebar badge and the in-chat indicator stuck visible until
+      // the user manually scrolls.
+      //
+      // Cancel any in-flight timer first so a quick
+      // conversation-flip doesn't double-fire on the wrong entity.
+      if (this._postSwitchMarkReadTimer) {
+        clearTimeout(this._postSwitchMarkReadTimer);
+      }
+      const switchedToEntityId = entityId;
+      this._postSwitchMarkReadTimer = setTimeout(() => {
+        this._postSwitchMarkReadTimer = null;
+        // Skip if the user has switched away to a different
+        // conversation in the meantime — `_currentEntityId` is
+        // updated synchronously inside `_onConversationSelected`.
+        if (this._currentEntityId !== switchedToEntityId) return;
+        this._checkAndMarkReadIfAtBottom();
+      }, MARK_READ_GRACE_PERIOD_MS);
 
-      // Mark as read when switching to a conversation
-      this._markActiveRead(entityId);
+      // Phase 4 (Change 8a): NO eager mark-read here. Mark-read fires
+      // only from `_checkAndMarkReadIfAtBottom`, driven by viewport
+      // scroll position (Change 8d) or the "↓ N new" indicator
+      // (Change 8f).
+      this._messageStore.switchEntity(entityId, anchor);
     }
   }
 
@@ -886,34 +1089,86 @@ export class ChatPage extends LitElement {
     });
   }
 
+  /**
+   * Phase 4 (Change 8e): auto-scroll-on-new-message.
+   *
+   * Gated on BOTH `!hasNewerMessages` AND user-was-at-bottom — we never
+   * auto-jump to the bottom when there are unloaded newer messages
+   * (the visual jump would skip past whatever the user was reading
+   * mid-buffer; see R2). When auto-scroll fires, we also call
+   * `_checkAndMarkReadIfAtBottom` so the cursor advances naturally as
+   * each new message arrives while the user is at the tail.
+   */
   private _scrollToBottomIfNearEnd() {
     // Don't auto-scroll while a conversation-switch scroll is in progress
     if (this._isScrollGuarded()) return;
+    const store = this._messageStore;
+    // Phase 4 (Change 8e): skip auto-scroll when buffer tail isn't the
+    // conversation's newest. R2 mitigation.
+    if (store?.hasNewerMessages) return;
     this.updateComplete.then(() => {
       requestAnimationFrame(() => {
         if (this._isScrollGuarded()) return;
         const container = this._getChatContainer();
         if (!container) return;
-        // Only auto-scroll if user is within 100px of bottom
+        // Only auto-scroll if user is within AT_BOTTOM_THRESHOLD_PX of bottom
         const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-        if (distFromBottom < 100) {
+        if (distFromBottom < AT_BOTTOM_THRESHOLD_PX) {
           container.scrollTop = container.scrollHeight;
+          this._checkAndMarkReadIfAtBottom();
         }
       });
     });
   }
 
+  /**
+   * Phase 4 (Change 8d): unified scroll handler.
+   *
+   * Three responsibilities on every scroll event:
+   *   (i) Lazy-load older messages near top (within
+   *       LAZY_LOAD_TRIGGER_PX). Preserves scroll position by
+   *       compensating for the added height after the new messages
+   *       are prepended.
+   *   (ii) Lazy-load newer messages near bottom when
+   *       `hasNewerMessages` is true. No scroll correction needed —
+   *       newer messages append to the tail.
+   *   (iii) Viewport-based mark-read: when near bottom AND
+   *       `!hasNewerMessages` (the user has the chronologically
+   *       newest message in view), call
+   *       `_checkAndMarkReadIfAtBottom`. The R1 grace period
+   *       suppresses the FIRST auto-mark-read after each conversation
+   *       switch.
+   *
+   * Also keeps `MessageStore.setUserAtBottom(...)` synchronized with
+   * the viewport every event — the store uses that flag to decide
+   * whether incoming realtime messages should tick the indicator
+   * counter or fire mark-read directly.
+   */
   private _onChatScroll(e: Event) {
     const container = e.target as HTMLElement;
-    if (!container || !this._messageStore) return;
+    const store = this._messageStore;
+    if (!container || !store) return;
 
-    // Trigger lazy loading when user scrolls near the top (within 150px)
-    if (container.scrollTop < 150 && this._messageStore.hasOlderMessages && !this._messageStore.loadingOlder) {
-      // Save scroll height before loading so we can preserve position
+    const distFromTop = container.scrollTop;
+    const distFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const atBottom = distFromBottom < AT_BOTTOM_THRESHOLD_PX;
+
+    // (iii) prerequisite — keep the store's at-bottom flag synchronized
+    // with the viewport on every event. The store's R5c logic (counter
+    // reset on transition to at-bottom while caught up) and the
+    // realtime path (decide whether to tick the indicator counter or
+    // fire mark-read) both depend on this flag being current.
+    store.setUserAtBottom(atBottom);
+
+    // (i) Lazy-load older messages near top.
+    if (
+      distFromTop < LAZY_LOAD_TRIGGER_PX &&
+      store.hasOlderMessages &&
+      !store.loadingOlder
+    ) {
       const prevScrollHeight = container.scrollHeight;
-
-      this._messageStore.loadOlderMessages().then(() => {
-        // After older messages are prepended, adjust scroll to maintain position
+      store.loadOlderMessages().then(() => {
         this.updateComplete.then(() => {
           requestAnimationFrame(() => {
             const newScrollHeight = container.scrollHeight;
@@ -925,6 +1180,119 @@ export class ChatPage extends LitElement {
         });
       });
     }
+
+    // Near-bottom branch: either lazy-load newer (buffer tail not
+    // current) or fire mark-read (buffer tail is current).
+    if (atBottom) {
+      if (store.hasNewerMessages && !store.loadingNewer) {
+        // (ii) Append newer messages — no scroll correction needed.
+        store.loadNewerMessages();
+      } else if (!store.hasNewerMessages) {
+        // (iii) Buffer tail IS the conversation's newest message.
+        this._checkAndMarkReadIfAtBottom();
+      }
+    }
+  }
+
+  /**
+   * Phase 4 fix (Bug #2): geometric "last message visible" check.
+   *
+   * Replaces the pre-fix pixel-distance check
+   * (`distFromBottom < AT_BOTTOM_THRESHOLD_PX = 150`) inside the
+   * mark-read trigger. 150 px is roughly 1-2 message-bubble heights,
+   * so the user could be that far above the actual newest message
+   * and still trigger mark-read prematurely (visible in 2026-05-04
+   * Phase 4 manual test, video 2 — 15-unread case marked read with
+   * the latest message still off-screen).
+   *
+   * The intent of the proposal's §"Mark-read semantics" was "user has
+   * the chronologically newest message visible." This helper checks
+   * exactly that by comparing the last `meshcore-message-bubble`'s
+   * bottom edge against the chat container's bottom edge. 5 px slack
+   * absorbs sub-pixel rounding from getBoundingClientRect.
+   *
+   * `AT_BOTTOM_THRESHOLD_PX = 150` is unchanged for `setUserAtBottom`
+   * and lazy-load-newer triggering — those are coarser concerns where
+   * pixel-perfect bottom detection isn't required (and is in fact
+   * unhelpful for the lazy-load-newer case, where you want to start
+   * fetching before the user hits the literal bottom).
+   */
+  private _isLastMessageVisible(): boolean {
+    const container = this._getChatContainer();
+    if (!container) return false;
+    const bubbles = container.querySelectorAll('meshcore-message-bubble');
+    const last = bubbles[bubbles.length - 1] as HTMLElement | undefined;
+    if (!last) return false;
+    const containerBottom = container.getBoundingClientRect().bottom;
+    const lastBottom = last.getBoundingClientRect().bottom;
+    return lastBottom <= containerBottom + 5;
+  }
+
+  /**
+   * Phase 4 (Change 8d): viewport-based mark-read trigger.
+   *
+   * Idempotent — the backend's `mark_read` is cheap and
+   * `UnreadTracker._schedule_save` debounces persistence, so firing
+   * this on every scroll event near the bottom is safe.
+   *
+   * R1 grace period: the FIRST auto-mark-read after a conversation
+   * switch is suppressed until `_markReadGraceUntil` has elapsed,
+   * giving the user a chance to start scrolling up before the cursor
+   * advances. Subsequent mark-reads in the same conversation fire
+   * without delay (the timestamp is in the past from the second call
+   * onward).
+   *
+   * Bug #2 fix (post-Phase-4): also gates on `_isLastMessageVisible()`
+   * so mark-read only fires when the chronologically newest bubble is
+   * actually within the viewport, not just when the scroll is within
+   * 150 px of the buffer bottom.
+   *
+   * Resets the "↓ N new" indicator counter after firing — the user is
+   * caught up, so the badge should clear.
+   */
+  private _checkAndMarkReadIfAtBottom(): void {
+    if (!this._currentEntityId) return;
+    if (Date.now() < this._markReadGraceUntil) return;
+    // Defensive: also gate on `!hasNewerMessages` here so any caller
+    // (the deferred-re-check timer, _jumpToBottom, _onChatScroll) is
+    // safe. _onChatScroll already checks this externally; the timer
+    // path didn't, which is what made this gate worth duplicating
+    // inside the helper.
+    if (this._messageStore?.hasNewerMessages) return;
+    if (!this._isLastMessageVisible()) return;
+    this._markActiveRead(this._currentEntityId);
+    this._messageStore?.resetNewMessagesCounter();
+  }
+
+  /**
+   * Phase 4 (Change 8f): "↓ N new" indicator click handler.
+   *
+   * Loads any unloaded newer messages (50 at a time) until the
+   * MessageStore reports `hasNewerMessages === false`, then scrolls
+   * to the bottom of the buffer and fires `_checkAndMarkReadIfAtBottom`
+   * so the cursor advances.
+   *
+   * `loadNewerMessages` itself is reentrance-guarded by `_loadingNewer`
+   * — the `&& !store.loadingNewer` check in the loop is belt-and-
+   * suspenders.
+   */
+  private async _jumpToBottom(): Promise<void> {
+    const store = this._messageStore;
+    if (!store) return;
+    while (store.hasNewerMessages && !store.loadingNewer) {
+      await store.loadNewerMessages();
+    }
+    await this.updateComplete;
+    requestAnimationFrame(() => {
+      const container = this._getChatContainer();
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+      // Bypass the R1 grace period — the user explicitly clicked the
+      // indicator to jump to current, so they're definitionally at the
+      // tail and want the mark-read to fire immediately.
+      this._markReadGraceUntil = 0;
+      this._checkAndMarkReadIfAtBottom();
+    });
   }
 
   private _getUnreadCountForSelected(): number {

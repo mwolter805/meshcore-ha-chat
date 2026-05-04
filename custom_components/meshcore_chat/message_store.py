@@ -24,6 +24,7 @@ Standalone HACS Integration.md, Change 5):
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import time
 from datetime import datetime, timedelta
@@ -226,13 +227,32 @@ class MessageStore:
         messages = await self._ensure_loaded(entity_id)
 
         # Dedup by ID (check recent messages only).
+        # After the chronological-insert change below, ``messages[-50:]`` is
+        # the newest 50 by timestamp (was: the 50 most-recently-inserted).
+        # Improvement: dedup intent was always chronological — a delayed
+        # mesh event re-arriving after a more recent event no longer slips
+        # past the window simply because it landed at the tail.
         msg_id = message.get("id", "")
         if msg_id and any(m.get("id") == msg_id for m in messages[-50:]):
             return
 
-        messages.append(message)
+        # Bisect-insert by timestamp keeps the list chronological even when
+        # a delayed mesh event arrives after a more recent message has
+        # already been stored. Cost: O(log n) lookup + O(n) shift; n is
+        # bounded by ``max_per_conv`` (default 1000), so total cost is
+        # sub-millisecond. ``last_read`` cursor logic (Phases 1+) and
+        # ``get_messages(limit=N)`` semantics depend on ``messages[-1]``
+        # being the chronologically newest message, not the most-recently
+        # inserted one.
+        bisect.insort(
+            messages, message, key=lambda m: m.get("timestamp", "")
+        )
 
         # Enforce per-conversation limit (FIFO trim).
+        # ``messages[-max:]`` now keeps the chronologically newest N — the
+        # correct behaviour, and an upgrade from the prior insertion-order
+        # semantics that could have evicted a recently-arrived but
+        # older-by-timestamp message.
         max_per_conv = self.config_entry.options.get(
             OPT_MAX_MESSAGES_PER_CONVERSATION,
             DEFAULT_MAX_MESSAGES_PER_CONVERSATION,
@@ -243,12 +263,15 @@ class MessageStore:
         self._conversation_dirty.add(entity_id)
         self._schedule_conversation_save(entity_id)
 
-        # Update lightweight index.
+        # Update lightweight index. ``messages[-1]`` is now guaranteed to
+        # be the chronologically newest message in the buffer, which is
+        # what the index is intended to surface.
+        newest = messages[-1]
         self._message_index[entity_id] = {
             "message_count": len(messages),
-            "last_message_ts": message.get("timestamp", ""),
-            "last_sender": message.get("sender", ""),
-            "last_preview": (message.get("text", "") or "")[:50],
+            "last_message_ts": newest.get("timestamp", ""),
+            "last_sender": newest.get("sender", ""),
+            "last_preview": (newest.get("text", "") or "")[:50],
         }
         self._schedule_index_save()
 
@@ -335,6 +358,76 @@ class MessageStore:
             # For 'after' queries return oldest-first (up to limit).
             return messages[:limit]
         return messages[-limit:]
+
+    async def get_messages_around(
+        self,
+        entity_id: str,
+        anchor_id: str,
+        before_limit: int = 25,
+        after_limit: int = 50,
+    ) -> tuple[list[dict], int, bool, bool, bool]:
+        """Return a window of messages anchored on ``anchor_id``.
+
+        Phase 2 of the last-read-anchor proposal. Used by the panel on
+        conversation open to load a narrow band around the persisted
+        last-read cursor in a single round-trip — typically 25 older +
+        50 newer messages — instead of paging up from the newest 50 to
+        find the unread divider.
+
+        The window is computed against the chronologically-sorted store
+        list (Phase 0 made that ordering reliable via ``bisect.insort``).
+        Slice semantics:
+
+        - ``start = max(0, anchor_idx - before_limit + 1)`` — anchor
+          itself counts as one of the "before" messages so the panel
+          can keep the anchor visible at the bottom of the read history.
+        - ``end = min(len(all), anchor_idx + after_limit + 1)`` — first
+          ``after_limit`` messages strictly newer than the anchor.
+        - ``has_more_before`` / ``has_more_after`` — flags telling the
+          frontend whether to enable the lazy-load triggers in either
+          direction.
+
+        Anchor-not-found path (R3 in the proposal): pruning, manual
+        deletion of ``.storage/meshcore_chat.<entity>.json``, or a future
+        archive feature could orphan the cursor. We fall back to the
+        newest ``(before_limit + after_limit)`` messages with
+        ``anchor_found = False`` so the frontend can render a no-divider
+        view that's identical to a fresh-install open. The total fallback
+        size matches the regular window's max length (75 by default), so
+        the panel never has to special-case the wire shape.
+
+        Returns:
+            ``(window, anchor_index_in_window, has_more_before,
+            has_more_after, anchor_found)``. ``anchor_index_in_window``
+            is the position of ``anchor_id`` inside ``window``; on the
+            anchor-not-found path it's ``len(window)`` so the divider
+            renders at the end of the buffer (which is also the bottom).
+        """
+        all_msgs = await self._ensure_loaded(entity_id)
+        anchor_idx = next(
+            (i for i, m in enumerate(all_msgs) if m.get("id") == anchor_id),
+            None,
+        )
+        if anchor_idx is None:
+            tail = all_msgs[-(before_limit + after_limit):]
+            return (
+                tail,
+                len(tail),
+                len(all_msgs) > len(tail),
+                False,
+                False,
+            )
+
+        start = max(0, anchor_idx - before_limit + 1)
+        end = min(len(all_msgs), anchor_idx + after_limit + 1)
+        window = all_msgs[start:end]
+        return (
+            window,
+            anchor_idx - start,
+            start > 0,
+            end < len(all_msgs),
+            True,
+        )
 
     def get_message_index(self) -> dict[str, dict]:
         """Return the lightweight message index (always in memory)."""

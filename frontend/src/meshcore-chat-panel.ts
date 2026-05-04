@@ -4,7 +4,7 @@ import type { HomeAssistant, PanelConfig, Contact, Channel, MeshCoreDevice } fro
 import type { TraceResult } from './api';
 import { panelStyles } from './styles';
 import { MESHCORE_PRESET, DEFAULT_PANEL_CONFIG } from './constants';
-import { getDevices, getContacts, getChannels, getUnreadCounts, removeContact, addContact, traceContact, type TracePathMode } from './api';
+import { getDevices, getContacts, getChannels, getUnreadAndLastRead, removeContact, addContact, traceContact, type TracePathMode } from './api';
 import './pages/chat-page';
 import './pages/devices-page';
 import './pages/nodes-page';
@@ -30,6 +30,18 @@ export class MeshCorePanel extends LitElement {
   @state() private _error: string | null = null;
   @state() private _unsubscribeList: Array<() => void> = [];
   @state() private _unreadCounts: Record<string, number> = {};
+  /**
+   * Phase 4 (Change 9): per-entity last-read message-ID cursor map,
+   * sourced from `meshcore_chat/get_unread_counts` (Phase 1 extended
+   * the payload to `{unread, last_read}`). Piped through to
+   * `<chat-page>` as `.lastRead` so the chat page can drive
+   * anchor-based open via `MessageStore.switchEntity(entityId, anchor)`.
+   *
+   * Refreshed on `meshcore_unread_updated` bus events alongside
+   * `_unreadCounts`, and on `unread-cleared` bubbles from chat-page
+   * (since `mark_read` snapshotted a new cursor on the backend).
+   */
+  @state() private _lastRead: Record<string, string> = {};
   @state() private _pendingChatTarget: string | null = null;
   /** Entity ID of the conversation currently being viewed in chat. */
   private _activeChatEntityId: string | null = null;
@@ -579,6 +591,7 @@ export class MeshCorePanel extends LitElement {
             .config=${this._config}
             .conversations=${[...this._channels, ...this._contacts.filter(c => c.added_to_node)]}
             .unreadCounts=${this._unreadCounts}
+            .lastRead=${this._lastRead}
             .selectedId=${this._pendingChatTarget}
             .narrow=${this.narrow}
             @unread-cleared=${this._onUnreadCleared}
@@ -736,6 +749,15 @@ export class MeshCorePanel extends LitElement {
       // Immediately zero out the count locally — don't wait for backend event
       this._unreadCounts = { ...this._unreadCounts, [entityId]: 0 };
     }
+    // Phase 4 (Change 9): mark_read also snapshotted a new last-read
+    // cursor on the backend. Refresh the maps so the next conversation
+    // open uses the just-advanced cursor as its anchor. The 2 s save
+    // debounce on UnreadTracker means the persisted file may lag the
+    // in-memory cursor by up to that long, but the in-memory map is
+    // updated synchronously inside `ws_mark_read`, so a fresh
+    // `get_unread_counts` round-trip immediately reflects the new
+    // value.
+    this._loadUnreadCounts();
   }
 
   private _onActiveEntityChanged(e: CustomEvent) {
@@ -772,12 +794,20 @@ export class MeshCorePanel extends LitElement {
   private async _loadUnreadCounts() {
     if (!this.hass) return;
     try {
-      const counts = await getUnreadCounts(this.hass, this._selectedEntryId || undefined);
+      // Phase 4 (Change 9): fetch both maps in one round-trip — the
+      // backend returns them in the same payload, and the chat page
+      // needs both for anchor-driven open.
+      const result = await getUnreadAndLastRead(
+        this.hass,
+        this._selectedEntryId || undefined,
+      );
+      const counts = result.unread;
       // Zero out the actively-viewed conversation — user is already reading it
       if (this._activeChatEntityId && counts[this._activeChatEntityId]) {
         counts[this._activeChatEntityId] = 0;
       }
       this._unreadCounts = counts;
+      this._lastRead = result.last_read;
     } catch {
       // Silently fail
     }

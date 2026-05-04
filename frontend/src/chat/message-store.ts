@@ -7,6 +7,7 @@ import type {
   StoredMessage,
 } from '../types';
 import { generateId, extractMentions, toClientMessage } from './message-parser';
+import { getMessagesAround } from '../api';
 import {
   CHANNEL_PREFIX_REGEX,
   FETCH_MAX_RETRIES,
@@ -45,6 +46,31 @@ export class MessageStore {
   private _hasOlderMessages = true;
   private _loadingOlder = false;
 
+  // ─── Phase 3: bidirectional load + read-receipt plumbing ─────────────
+  //
+  // `_hasNewerMessages` flips true on anchored open when the backend
+  // reports `has_more_after`; flips false again once `loadNewerMessages`
+  // catches up to the conversation tail. Phase 4's `_onChatScroll` reads
+  // it to gate viewport-based mark-read (you can't be "at the newest
+  // message" if there are unloaded newer messages).
+  //
+  // `_userAtBottom` is set by Phase 4's scroll handler via
+  // `setUserAtBottom()`. Defaulting to `false` makes the realtime path
+  // conservative pre-Phase-4 — any incoming arrival ticks the indicator
+  // counter, which is harmless because pre-Phase-4 chat-page never
+  // renders the indicator.
+  //
+  // `_newMessagesWhileAway` is the counter behind the "↓ N new" indicator
+  // (Phase 4 §8f). `_handleRealtimeMessage` increments it on a new
+  // incoming arrival when `_userAtBottom === false`. R5c mitigation:
+  // counter resets when `setUserAtBottom(true)` is called AND
+  // `!_hasNewerMessages` — being at the bottom of a partial buffer with
+  // unloaded newer messages on disk is *not* "caught up."
+  private _hasNewerMessages = false;
+  private _loadingNewer = false;
+  private _newMessagesWhileAway = 0;
+  private _userAtBottom = false;
+
   constructor(config: PanelConfig) {
     this._config = config;
   }
@@ -73,6 +99,60 @@ export class MessageStore {
     return this._hasOlderMessages;
   }
 
+  // ─── Phase 3: bidirectional load + read-receipt plumbing ─────────────
+
+  get loadingNewer(): boolean {
+    return this._loadingNewer;
+  }
+
+  get hasNewerMessages(): boolean {
+    return this._hasNewerMessages;
+  }
+
+  /**
+   * Number of new incoming messages that arrived while the user was
+   * scrolled away from the bottom of the buffer. Drives the "↓ N new"
+   * indicator added in Phase 4 §8f.
+   */
+  get newMessagesWhileAway(): number {
+    return this._newMessagesWhileAway;
+  }
+
+  /**
+   * Phase 3 plumbing: chat-page calls this from its scroll handler in
+   * Phase 4. ``true`` means the user has the bottom of the buffer in
+   * view. Combined with ``!hasNewerMessages``, this is what counts as
+   * "the user has actually seen the newest message" — the trigger for
+   * viewport-based mark-read in Phase 4 §8d.
+   *
+   * R5c mitigation: when transitioning from away → at-bottom AND the
+   * buffer tail is the conversation's newest (``!_hasNewerMessages``),
+   * reset ``_newMessagesWhileAway``. The proposal calls this out
+   * explicitly — being at the bottom of a partial buffer with unloaded
+   * newer messages on disk is *not* the same as being caught up.
+   */
+  setUserAtBottom(value: boolean): void {
+    if (this._userAtBottom === value) return;
+    this._userAtBottom = value;
+    if (value && !this._hasNewerMessages && this._newMessagesWhileAway > 0) {
+      this._newMessagesWhileAway = 0;
+      this._notify();
+    }
+  }
+
+  /**
+   * Phase 4's "↓ N new" indicator click handler resets the counter once
+   * the indicator's `_jumpToBottom` flow has loaded any unloaded newer
+   * messages and scrolled to the bottom. Exposed as a public method so
+   * the indicator's onClick can clear the badge in the same tick the
+   * mark-read fires.
+   */
+  resetNewMessagesCounter(): void {
+    if (this._newMessagesWhileAway === 0) return;
+    this._newMessagesWhileAway = 0;
+    this._notify();
+  }
+
   /**
    * Set the change callback — called whenever messages, loading, or error state changes.
    */
@@ -96,8 +176,22 @@ export class MessageStore {
 
   /**
    * Switch to a new entity. Triggers fresh fetch from the message store.
+   *
+   * Phase 3: optional ``anchorId`` parameter routes the open through
+   * ``_fetchAroundAnchor`` (Change 6 / 7), which loads ``before_limit``
+   * messages older than the anchor + ``after_limit`` messages newer in a
+   * single round-trip. ``_hasOlderMessages`` and ``_hasNewerMessages``
+   * are then both seeded from the response's ``has_more_before`` /
+   * ``has_more_after`` flags so the symmetric lazy-load triggers can
+   * fire correctly. ``anchorId`` defaults to ``null`` so existing call
+   * sites — including pre-Phase-4 ``chat-page.ts`` — keep their
+   * existing newest-50 behaviour. Phase 4 flips ``chat-page.ts`` over
+   * to passing ``lastRead?.[entityId] ?? null``.
    */
-  async switchEntity(entityId: string | null): Promise<void> {
+  async switchEntity(
+    entityId: string | null,
+    anchorId: string | null = null,
+  ): Promise<void> {
     if (entityId === this._entityId) return;
 
     // Cleanup previous subscriptions
@@ -109,6 +203,10 @@ export class MessageStore {
     this._retryCount = 0;
     this._hasOlderMessages = true;
     this._loadingOlder = false;
+    this._hasNewerMessages = false;
+    this._loadingNewer = false;
+    this._newMessagesWhileAway = 0;
+    this._userAtBottom = false;
 
     if (!entityId) {
       this._active = false;
@@ -122,7 +220,11 @@ export class MessageStore {
     this._startUpdates(entityId);
 
     // Fetch messages from the store
-    await this._fetchMessages(entityId);
+    if (anchorId) {
+      await this._fetchAroundAnchor(entityId, anchorId);
+    } else {
+      await this._fetchMessages(entityId);
+    }
   }
 
   /**
@@ -201,6 +303,99 @@ export class MessageStore {
       // Silently fail — user can try scrolling up again
     } finally {
       this._loadingOlder = false;
+      this._notify();
+    }
+  }
+
+  /**
+   * Load newer messages using cursor-based pagination (Phase 3, Change 7).
+   *
+   * Symmetric counterpart to ``loadOlderMessages`` — used by Phase 4's
+   * ``_onChatScroll`` when the user scrolls within
+   * ``LAZY_LOAD_TRIGGER_PX`` of the bottom *and* ``hasNewerMessages``
+   * is true (i.e., the buffer tail isn't yet the conversation's
+   * newest).
+   *
+   * The cursor is the newest non-temporary message id in the buffer
+   * (skipping ``rt_*`` and ``optimistic_*`` placeholders, which the
+   * backend never knows about). Reuses ``meshcore_chat/get_stored_
+   * messages`` with the ``after`` query — the same endpoint the existing
+   * ``_pollFetch`` consumes — and flips ``_hasNewerMessages`` from the
+   * response's ``has_more`` flag so the next scroll-down knows when to
+   * stop firing.
+   *
+   * No-op when there's nothing newer to load, or when an existing fetch
+   * is in flight, or when the entity / hass aren't set yet. The error
+   * branch is silent (matches ``loadOlderMessages``) — Phase 4's scroll
+   * handler will retry on the next scroll event.
+   */
+  async loadNewerMessages(): Promise<void> {
+    if (
+      this._loadingNewer ||
+      !this._hasNewerMessages ||
+      !this._hass ||
+      !this._entityId
+    ) {
+      return;
+    }
+
+    this._loadingNewer = true;
+    this._notify();
+
+    try {
+      // Cursor: newest non-temporary message id in the buffer
+      let afterId: string | undefined;
+      for (let i = this._messages.length - 1; i >= 0; i--) {
+        const id = this._messages[i].id;
+        if (!id.startsWith('rt_') && !id.startsWith('optimistic_')) {
+          afterId = id;
+          break;
+        }
+      }
+
+      const msg: Record<string, unknown> = {
+        type: 'meshcore_chat/get_stored_messages',
+        entity_id: this._entityId,
+        limit: 50,
+      };
+      if (afterId) msg.after = afterId;
+
+      const result = await this._hass.callWS<{
+        messages: StoredMessage[];
+        has_more: boolean;
+      }>(msg);
+
+      const newer = result.messages.map(toClientMessage);
+      this._hasNewerMessages = result.has_more;
+
+      // Strip rt_ versions of the freshly-stored messages, then dedup.
+      const newerIds = new Set(newer.map((m) => m.id));
+      this._messages = this._messages.filter(
+        (m) => !m.id.startsWith('rt_') || !newerIds.has(m.id.substring(3)),
+      );
+      const existingIds = new Set(this._messages.map((m) => m.id));
+      const filtered = newer.filter((m) => !existingIds.has(m.id));
+
+      if (filtered.length > 0) {
+        this._messages = [...this._messages, ...filtered];
+        this._messages.sort(
+          (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+        );
+
+        // Enforce max_messages limit. Trimming from the head (older end)
+        // preserves the just-loaded newer messages and bumps
+        // ``_hasOlderMessages`` so scroll-up can refetch the trimmed
+        // window. Mirrors the policy in `_fetchMessages` / `_pollFetch`.
+        const maxMessages = this._config.max_messages ?? 500;
+        if (this._messages.length > maxMessages) {
+          this._messages = this._messages.slice(-maxMessages);
+          this._hasOlderMessages = true;
+        }
+      }
+    } catch {
+      // Silent fail — Phase 4's scroll handler retries on the next event
+    } finally {
+      this._loadingNewer = false;
       this._notify();
     }
   }
@@ -312,6 +507,92 @@ export class MessageStore {
       this._messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
       // Enforce max_messages limit
+      const maxMessages = this._config.max_messages ?? 500;
+      if (this._messages.length > maxMessages) {
+        this._messages = this._messages.slice(-maxMessages);
+        this._hasOlderMessages = true;
+      }
+
+      this._error = null;
+      this._retryCount = 0;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this._error = `Failed to fetch messages: ${message}`;
+      this._retryCount++;
+    } finally {
+      this._loading = false;
+      this._notify();
+    }
+  }
+
+  /**
+   * Fetch a window around an anchor message id (Phase 3, Change 7).
+   *
+   * Backed by ``meshcore_chat/get_messages_around`` (Phase 2 backend).
+   * The window includes the anchor itself; the response carries an
+   * ``anchor_index`` offset for the panel's divider-positioning logic
+   * (consumed in Phase 4 §8b — Phase 3 doesn't render the divider).
+   *
+   * Sets BOTH ``_hasOlderMessages`` and ``_hasNewerMessages`` from the
+   * response flags, where ``_fetchMessages`` only seeds
+   * ``_hasOlderMessages`` (the newest-50 path is always at the tail by
+   * construction). Per Phase 2's caveat for Phase 3: failing to seed
+   * ``_hasNewerMessages`` would silently disable the symmetric
+   * scroll-down trigger Phase 4 wires up.
+   *
+   * Merge logic mirrors ``_fetchMessages``: rt_/optimistic placeholders
+   * arriving between ``switchEntity`` clearing ``_messages`` and the WS
+   * call returning are reconciled the same way (rt_ entries dropped if
+   * the stored copy is in the window; optimistic entries dropped if a
+   * matching real version arrives). For the anchor-driven open this is
+   * usually a no-op because the buffer was just cleared, but the gap
+   * is wide enough that a real-time event during the await is plausible.
+   */
+  private async _fetchAroundAnchor(
+    entityId: string,
+    anchorId: string,
+  ): Promise<void> {
+    if (!this._hass) return;
+
+    this._loading = true;
+    this._notify();
+
+    try {
+      const result = await getMessagesAround(this._hass, entityId, anchorId);
+
+      const fetched = result.messages.map(toClientMessage);
+      this._hasOlderMessages = result.has_more_before;
+      this._hasNewerMessages = result.has_more_after;
+
+      // Same merge policy as _fetchMessages — see comment block in
+      // that method. Anything that's not a stored, optimistic, or
+      // rt_-not-yet-superseded message gets dropped (the store is
+      // authoritative).
+      const fetchedIds = new Set(fetched.map((m) => m.id));
+      const kept = this._messages.filter((m) => {
+        if (m.id.startsWith('optimistic_')) {
+          const hasReal = fetched.some(
+            (f) => f.sender === m.sender && f.text === m.text,
+          );
+          return !hasReal;
+        }
+        if (m.id.startsWith('rt_')) {
+          const baseId = m.id.substring(3);
+          return !fetchedIds.has(baseId);
+        }
+        return false;
+      });
+
+      this._messages = [...fetched, ...kept];
+      this._messages.sort(
+        (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+      );
+
+      // Anchor-driven open windows are bounded by before_limit +
+      // after_limit (75 by default), so max_messages trim is unlikely
+      // to fire here — but apply it defensively in case rt_/optimistic
+      // carryover puts us over. Trim from the head (older end) to
+      // preserve the freshly-loaded after-window.
       const maxMessages = this._config.max_messages ?? 500;
       if (this._messages.length > maxMessages) {
         this._messages = this._messages.slice(-maxMessages);
@@ -468,6 +749,19 @@ export class MessageStore {
 
         this._messages.push(msg);
         this._messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+        // Phase 3, Change 7: when the user is scrolled away from the
+        // bottom (or there are unloaded newer messages on disk), tick
+        // the indicator counter. Phase 4 reads this to render the
+        // "↓ N new" sticky button. The "newer messages exist on disk"
+        // branch matters for the anchor-open case where the user lands
+        // mid-conversation and a fresh real-time event appears in the
+        // bottom strip of the buffer — the user may be scrolled near
+        // bottom but still NOT at the conversation's actual newest.
+        if (!this._userAtBottom || this._hasNewerMessages) {
+          this._newMessagesWhileAway++;
+        }
+
         this._notify();
       }
     }
@@ -580,6 +874,17 @@ export class MessageStore {
    */
   private async _pollFetch(entityId: string): Promise<void> {
     if (!this._hass) return;
+
+    // Phase 3, Change 7: when the buffer tail isn't the conversation's
+    // actual newest (anchor-driven open with unloaded messages newer
+    // than the after-window), polling's `after`-cursor query would
+    // jump straight from the current tail to the conversation's true
+    // tail and append a discontinuous run of messages with a hole in
+    // the middle. `loadNewerMessages()` is the right tool for closing
+    // that gap — it pages forward 50 at a time until `has_more` flips
+    // false, at which point `_hasNewerMessages` becomes false and the
+    // poll path resumes its normal incremental-tail role.
+    if (this._hasNewerMessages) return;
 
     try {
       // Find the newest non-temporary message ID for cursor

@@ -285,6 +285,55 @@ def test_get_store_returns_none_when_unknown(hass: HomeAssistant) -> None:
     assert ws_api._get_store(hass) is None
 
 
+def test_get_store_returns_none_for_foreign_entry(
+    hass: HomeAssistant,
+) -> None:
+    """An entry from another integration (no runtime_data) → None, no crash.
+
+    Regression: Phase 1's ``ws_mark_read`` exposed an AttributeError on
+    the dev host because the panel frontend forwards
+    ``this.config?.entry_id`` (typically the parent ``meshcore``
+    integration's id, NOT the chat companion's). HA's ``ConfigEntry``
+    only materialises ``runtime_data`` for the integration whose setup
+    populated it; a direct attribute read on a foreign entry raises.
+    The ``getattr`` shield collapses that to a clean None.
+    """
+    # Register an entry under a foreign domain — no runtime_data set.
+    foreign = MockConfigEntry(
+        domain="some_other_integration",
+        title="parent meshcore-style entry",
+        entry_id="01FOREIGN_ENTRY",
+        data={},
+        options={},
+    )
+    foreign.add_to_hass(hass)
+    # Must not raise — must return None.
+    assert ws_api._get_store(hass, foreign.entry_id) is None
+
+
+def test_get_store_falls_back_when_foreign_entry_id_passed(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Foreign entry_id should NOT short-circuit — explicit miss returns None.
+
+    Pins the contract: ``_get_store`` returns None for an entry_id that
+    resolves to a non-companion entry. Callers that want fall-back-to-
+    first-companion semantics pass ``None`` explicitly (see
+    ``ws_mark_read``); ``_get_store`` itself does not silently retry.
+    """
+    foreign = MockConfigEntry(
+        domain="some_other_integration",
+        entry_id="01FOREIGN_ENTRY",
+        data={},
+        options={},
+    )
+    foreign.add_to_hass(hass)
+    # Companion entry exists, but explicit foreign id is honored as a miss.
+    assert ws_api._get_store(hass, foreign.entry_id) is None
+    # None still uses the fallback to companion_entry.
+    assert ws_api._get_store(hass, None) is companion_entry.runtime_data.store
+
+
 # ─── ws_get_devices ─────────────────────────────────────────────────────
 
 
@@ -1279,23 +1328,72 @@ async def test_ws_cleanup_stale_neighbors_error_no_coordinator(
 async def test_ws_get_unread_counts_returns_empty_when_no_tracker(
     hass: HomeAssistant,
 ) -> None:
+    """No tracker → payload still carries both keys (Phase 1: stable shape)."""
     conn = _Connection()
     await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
-    assert conn.results[0][1] == {"unread": {}}
+    assert conn.results[0][1] == {"unread": {}, "last_read": {}}
 
 
 async def test_ws_get_unread_counts_happy(hass: HomeAssistant) -> None:
+    """Both unread counts and last_read map flow through the payload."""
     tracker = MagicMock()
     tracker.get_all_unread = MagicMock(return_value={"binary_sensor.x": 3})
+    tracker.get_all_last_read = MagicMock(
+        return_value={"binary_sensor.x": "msg_99"}
+    )
     hass.data[DOMAIN] = {"unread_tracker": tracker}
     conn = _Connection()
     await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
-    assert conn.results[0][1] == {"unread": {"binary_sensor.x": 3}}
+    assert conn.results[0][1] == {
+        "unread": {"binary_sensor.x": 3},
+        "last_read": {"binary_sensor.x": "msg_99"},
+    }
+
+
+async def test_get_unread_counts_includes_last_read(
+    hass: HomeAssistant,
+) -> None:
+    """Phase 1 Change 4: payload extension is backwards-compatible.
+
+    Older clients reading only ``unread`` continue to work; new clients
+    read ``last_read`` to populate per-conversation anchors on connect.
+    """
+    tracker = MagicMock()
+    tracker.get_all_unread = MagicMock(
+        return_value={"binary_sensor.alice": 5, "binary_sensor.bob": 1}
+    )
+    tracker.get_all_last_read = MagicMock(
+        return_value={
+            "binary_sensor.alice": "msg_aaa",
+            "binary_sensor.bob": "msg_bbb",
+        }
+    )
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
+    payload = conn.results[0][1]
+    assert "unread" in payload
+    assert "last_read" in payload
+    assert payload["unread"] == {
+        "binary_sensor.alice": 5,
+        "binary_sensor.bob": 1,
+    }
+    assert payload["last_read"] == {
+        "binary_sensor.alice": "msg_aaa",
+        "binary_sensor.bob": "msg_bbb",
+    }
 
 
 async def test_ws_mark_read_happy(hass: HomeAssistant) -> None:
+    """No companion store registered → mark_read still resolves cleanly.
+
+    Without a config entry on hass, ``_get_store`` returns None and the
+    snapshot path is skipped — the only assertion is that the in-memory
+    count is cleared and success is reported.
+    """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
+    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
     conn = _Connection()
     await _call_ws(
@@ -1305,6 +1403,9 @@ async def test_ws_mark_read_happy(hass: HomeAssistant) -> None:
         {"id": 1, "entity_id": "binary_sensor.alice"},
     )
     tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
+    # No store on hass → set_last_read must not fire (defensive: a
+    # snapshot without a backing store would be a fabricated cursor).
+    tracker.set_last_read.assert_not_called()
     assert conn.results[0][1] == {"success": True}
 
 
@@ -1315,6 +1416,159 @@ async def test_ws_mark_read_no_tracker(hass: HomeAssistant) -> None:
         ws_api.ws_mark_read, hass, conn,
         {"id": 1, "entity_id": "binary_sensor.x"},
     )
+    assert conn.results[0][1] == {"success": True}
+
+
+async def test_mark_read_snapshots_cursor(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Phase 1 Change 3: ws_mark_read snapshots the newest message id.
+
+    With a tracker AND a store both registered, mark-read clears the
+    in-memory count AND advances the persistent cursor to the newest
+    message in the conversation (returned by ``get_messages(limit=1)``).
+    """
+    tracker = MagicMock()
+    tracker.mark_read = AsyncMock()
+    tracker.set_last_read = AsyncMock()
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    companion_entry.runtime_data.store.get_messages = AsyncMock(
+        return_value=[{"id": "msg_newest"}]
+    )
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_mark_read,
+        hass,
+        conn,
+        {"id": 1, "entity_id": "binary_sensor.alice"},
+    )
+
+    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
+    tracker.set_last_read.assert_awaited_once_with(
+        "binary_sensor.alice", "msg_newest"
+    )
+    assert conn.results[0][1] == {"success": True}
+
+
+async def test_mark_read_snapshot_uses_get_messages(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Snapshot path calls ``get_messages(entity_id, limit=1)``.
+
+    Pinning the call signature so a future refactor of the message-store
+    API doesn't silently switch this to e.g. an index lookup that
+    doesn't include the newest message id.
+    """
+    tracker = MagicMock()
+    tracker.mark_read = AsyncMock()
+    tracker.set_last_read = AsyncMock()
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    get_messages_mock = AsyncMock(
+        return_value=[{"id": "msg_chronologically_newest"}]
+    )
+    companion_entry.runtime_data.store.get_messages = get_messages_mock
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_mark_read,
+        hass,
+        conn,
+        {"id": 1, "entity_id": "binary_sensor.alice"},
+    )
+
+    # Exact signature: positional entity_id, kw-only limit=1.
+    get_messages_mock.assert_awaited_once_with("binary_sensor.alice", limit=1)
+    tracker.set_last_read.assert_awaited_once_with(
+        "binary_sensor.alice", "msg_chronologically_newest"
+    )
+
+
+async def test_mark_read_with_foreign_entry_id_still_snapshots(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Frontend-passed foreign entry_id must not block the cursor snapshot.
+
+    Regression: the chat panel forwards ``this.config?.entry_id`` to
+    every WS handler, and on the dev host that resolves to the parent
+    ``meshcore`` integration's entry id — not the chat companion's.
+    Before this fix, ``ws_mark_read`` propagated that id into
+    ``_get_store`` and the snapshot path crashed with AttributeError.
+    The handler now ignores the inbound ``entry_id`` and uses the
+    fallback (``_get_store(hass, None)``) to find the chat companion's
+    store deterministically.
+    """
+    tracker = MagicMock()
+    tracker.mark_read = AsyncMock()
+    tracker.set_last_read = AsyncMock()
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    companion_entry.runtime_data.store.get_messages = AsyncMock(
+        return_value=[{"id": "msg_42"}]
+    )
+
+    # Foreign entry registered alongside the companion entry — mimics the
+    # parent meshcore integration on the dev host.
+    foreign = MockConfigEntry(
+        domain="some_other_integration",
+        entry_id="01FOREIGN_PARENT",
+        data={},
+        options={},
+    )
+    foreign.add_to_hass(hass)
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_mark_read,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "entity_id": "binary_sensor.alice",
+            # Frontend (incorrectly, historically) sends the parent's id.
+            "entry_id": foreign.entry_id,
+        },
+    )
+
+    # No crash; cursor still advances against the chat companion store.
+    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
+    tracker.set_last_read.assert_awaited_once_with(
+        "binary_sensor.alice", "msg_42"
+    )
+    assert conn.results[0][1] == {"success": True}
+
+
+async def test_mark_read_with_no_messages_no_op(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Empty conversation → cursor untouched, success still reported.
+
+    Defensive: ``recent`` is an empty list when the conversation has
+    never had a message stored. The snapshot must not fabricate a None
+    cursor or raise — it's a silent no-op on the cursor side, but the
+    in-memory count clear and the success reply still fire.
+    """
+    tracker = MagicMock()
+    tracker.mark_read = AsyncMock()
+    tracker.set_last_read = AsyncMock()
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    companion_entry.runtime_data.store.get_messages = AsyncMock(
+        return_value=[]  # No messages stored yet for this entity_id.
+    )
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_mark_read,
+        hass,
+        conn,
+        {"id": 1, "entity_id": "binary_sensor.empty"},
+    )
+
+    tracker.mark_read.assert_awaited_once_with("binary_sensor.empty")
+    tracker.set_last_read.assert_not_called()
     assert conn.results[0][1] == {"success": True}
 
 
@@ -2207,3 +2461,232 @@ def test_get_coordinator_idempotent_under_panel_polling(
         and i.issue_id == "upstream_meshcore_unavailable"
     ]
     assert len(matching) == 1
+
+
+# ─── ws_get_messages_around (Phase 2) ──────────────────────────────────
+
+
+async def _seed_companion_with_messages(
+    hass: HomeAssistant, n_messages: int
+) -> tuple[MockConfigEntry, str, list[str]]:
+    """Build a chat companion entry with a real MessageStore + N messages.
+
+    Returns ``(entry, entity_id, message_ids)`` where ``message_ids[i]``
+    is the id of the message at chronological index ``i`` (oldest first).
+
+    Seeds via ``store.store_message`` to exercise the same bisect-insort
+    + index-update path the production code uses. Timestamps are
+    monotonically increasing so the chronological order matches the
+    insertion order — required for ``anchor_idx`` assertions to map
+    cleanly onto the indices in this fixture.
+
+    The ``hass_storage`` fixture in PHACC intercepts the per-conversation
+    Store writes; tests don't need a temp directory.
+    """
+    from custom_components.meshcore_chat.message_store import MessageStore
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="MeshCore Chat",
+        entry_id="01CHAT_REAL",
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    real_store = MessageStore(hass, entry)
+    await real_store.async_load_index()
+
+    entity_id = "binary_sensor.test_channel"
+    message_ids: list[str] = []
+    for i in range(n_messages):
+        msg_id = f"msg_{i:03d}"
+        message_ids.append(msg_id)
+        await real_store.store_message(
+            entity_id,
+            {
+                "id": msg_id,
+                "timestamp": f"2026-05-04T00:00:{i:03d}",
+                "sender": "alice",
+                "text": f"message {i}",
+            },
+        )
+
+    entry.runtime_data = MeshCoreChatRuntimeData(store=real_store)
+    return entry, entity_id, message_ids
+
+
+async def test_get_messages_around_anchor_in_middle(
+    hass: HomeAssistant,
+) -> None:
+    """Phase 2 happy path: anchor mid-conversation returns a centred window.
+
+    100-message conversation, anchor at chronological index 50 (id
+    ``msg_050``), default ``before_limit=25`` + ``after_limit=50``.
+    Slice math:
+
+    - ``start = max(0, 50 - 25 + 1) = 26``
+    - ``end = min(100, 50 + 50 + 1) = 100`` (clamped)
+    - ``window = msgs[26:100]`` → length 74 (Python slice is half-open;
+      100-26 = 74 messages survive into the response)
+    - ``anchor_index = 50 - 26 = 24``
+    - ``has_more_before = True`` (start moved past 0)
+    - ``has_more_after = False`` (end was clamped at the tail)
+
+    Pins the centred-window contract so future refactors of the slice
+    boundaries can't silently drop the anchor or skew the divider.
+    """
+    entry, entity_id, msg_ids = await _seed_companion_with_messages(
+        hass, n_messages=100
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_get_messages_around,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "entity_id": entity_id,
+            "anchor_id": msg_ids[50],
+        },
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["anchor_found"] is True
+    assert payload["has_more_before"] is True
+    assert payload["has_more_after"] is False
+    assert payload["anchor_index"] == 24
+    assert len(payload["messages"]) == 74
+    # Window starts at chronological idx 26 and ends at idx 99 inclusive.
+    assert payload["messages"][0]["id"] == "msg_026"
+    assert payload["messages"][-1]["id"] == "msg_099"
+    # Anchor sits at the documented offset inside the window.
+    assert payload["messages"][24]["id"] == "msg_050"
+
+    await entry.runtime_data.store.async_unload()
+
+
+async def test_get_messages_around_anchor_not_found(
+    hass: HomeAssistant,
+) -> None:
+    """Anchor missing from store → R3 fallback path (newest-N).
+
+    A bogus ``anchor_id`` (one that's never been stored) shouldn't
+    error — the panel relies on this graceful path so a pruned or
+    archived cursor doesn't blank the conversation. The fallback
+    returns the newest ``before_limit + after_limit`` messages with
+    ``anchor_found = False`` so the frontend renders a no-divider view
+    that's identical to a fresh-install open.
+    """
+    entry, entity_id, _msg_ids = await _seed_companion_with_messages(
+        hass, n_messages=100
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_get_messages_around,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "entity_id": entity_id,
+            "anchor_id": "msg_does_not_exist",
+        },
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["anchor_found"] is False
+    # Tail = last 75 (= 25 + 50) messages from the 100-msg conversation.
+    assert len(payload["messages"]) == 75
+    assert payload["messages"][0]["id"] == "msg_025"
+    assert payload["messages"][-1]["id"] == "msg_099"
+    # has_more_before is True because 25 messages remain before the tail
+    # (the 100-msg conversation is bigger than the fallback window).
+    assert payload["has_more_before"] is True
+    assert payload["has_more_after"] is False
+    # anchor_index defaults to len(tail) so the divider lands at the
+    # bottom of the buffer when the frontend renders this fallback.
+    assert payload["anchor_index"] == 75
+
+    await entry.runtime_data.store.async_unload()
+
+
+async def test_get_messages_around_anchor_at_head(
+    hass: HomeAssistant,
+) -> None:
+    """Anchor on oldest message → no older messages remain to load.
+
+    With anchor at chronological index 0, ``start`` clamps to 0 and
+    ``has_more_before`` must be False so the panel disables the
+    upward lazy-load trigger (otherwise the user could scroll up
+    forever pulling empty windows).
+    """
+    entry, entity_id, msg_ids = await _seed_companion_with_messages(
+        hass, n_messages=100
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_get_messages_around,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "entity_id": entity_id,
+            "anchor_id": msg_ids[0],
+        },
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["anchor_found"] is True
+    assert payload["has_more_before"] is False
+    assert payload["has_more_after"] is True
+    # anchor at idx 0 → start=0, end=min(100, 0+50+1)=51
+    # window length = 51, anchor_index = 0
+    assert payload["anchor_index"] == 0
+    assert len(payload["messages"]) == 51
+    assert payload["messages"][0]["id"] == "msg_000"
+    assert payload["messages"][-1]["id"] == "msg_050"
+
+    await entry.runtime_data.store.async_unload()
+
+
+async def test_get_messages_around_anchor_at_tail(
+    hass: HomeAssistant,
+) -> None:
+    """Anchor on newest message → no newer messages remain to load.
+
+    With anchor at the chronological tail, ``end`` clamps to
+    ``len(all_msgs)`` and ``has_more_after`` must be False so the
+    panel disables the downward lazy-load trigger AND the
+    ``hasNewerMessages`` guard fires on real-time event handling.
+    """
+    entry, entity_id, msg_ids = await _seed_companion_with_messages(
+        hass, n_messages=100
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_get_messages_around,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "entity_id": entity_id,
+            "anchor_id": msg_ids[-1],
+        },
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["anchor_found"] is True
+    assert payload["has_more_before"] is True
+    assert payload["has_more_after"] is False
+    # anchor at idx 99 → start=max(0, 99-24)=75, end=min(100, 99+50+1)=100
+    # window length = 25, anchor sits at offset 99-75=24
+    assert payload["anchor_index"] == 24
+    assert len(payload["messages"]) == 25
+    assert payload["messages"][0]["id"] == "msg_075"
+    assert payload["messages"][-1]["id"] == "msg_099"
+
+    await entry.runtime_data.store.async_unload()

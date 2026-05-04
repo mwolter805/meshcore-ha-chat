@@ -308,16 +308,30 @@ def _get_store(
     (typically a singleton per HA instance because the panel is installed
     once). When omitted, falls back to the first companion config entry
     that has a runtime_data store.
+
+    Defensive ``getattr`` shields the isinstance check from entries
+    belonging to other integrations: HA's ``ConfigEntry`` only
+    materialises ``runtime_data`` on the entry whose setup populated it,
+    so a direct attribute read on a non-companion entry raises
+    AttributeError. Frontend call sites occasionally pass the parent
+    ``meshcore`` integration's entry_id (rather than the chat
+    companion's) — bringing that down the same code path was the source
+    of the Phase 1 dev-host runtime crash; ``getattr`` collapses the
+    miss to a clean None.
     """
     if entry_id:
         entry = hass.config_entries.async_get_entry(entry_id)
-        if entry and isinstance(entry.runtime_data, MeshCoreChatRuntimeData):
+        if entry and isinstance(
+            getattr(entry, "runtime_data", None), MeshCoreChatRuntimeData
+        ):
             return entry.runtime_data.store
         return None
 
     # Fallback: first companion entry with a store.
     for entry in hass.config_entries.async_entries(DOMAIN):
-        if isinstance(entry.runtime_data, MeshCoreChatRuntimeData):
+        if isinstance(
+            getattr(entry, "runtime_data", None), MeshCoreChatRuntimeData
+        ):
             return entry.runtime_data.store
     return None
 
@@ -364,6 +378,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_stored_messages)
     websocket_api.async_register_command(hass, ws_get_stored_message_count)
     websocket_api.async_register_command(hass, ws_search_stored_messages)
+    websocket_api.async_register_command(hass, ws_get_messages_around)
 
     _LOGGER.debug("Registered MeshCore Chat WebSocket API commands")
 
@@ -1686,12 +1701,28 @@ async def ws_cleanup_stale_neighbors(hass, connection, msg):
 )
 @callback
 def ws_get_unread_counts(hass, connection, msg):
-    """Get all unread message counts."""
+    """Get all unread message counts plus the persisted last-read cursors.
+
+    Phase 1 (proposal Change 4): the payload now includes a ``last_read``
+    map alongside ``unread`` so the panel can populate both badge counts
+    and per-conversation anchors in a single round-trip on connect.
+    Older clients that only read ``unread`` continue to work — the new
+    field is additive.
+    """
     tracker = hass.data.get(DOMAIN, {}).get("unread_tracker")
     if not tracker:
-        connection.send_result(msg["id"], {"unread": {}})
+        # Empty maps for both fields keeps the wire shape stable for
+        # frontends written against the new schema, regardless of
+        # whether the tracker is initialised.
+        connection.send_result(msg["id"], {"unread": {}, "last_read": {}})
         return
-    connection.send_result(msg["id"], {"unread": tracker.get_all_unread()})
+    connection.send_result(
+        msg["id"],
+        {
+            "unread": tracker.get_all_unread(),
+            "last_read": tracker.get_all_last_read(),
+        },
+    )
 
 
 @websocket_api.websocket_command(
@@ -1703,10 +1734,40 @@ def ws_get_unread_counts(hass, connection, msg):
 )
 @websocket_api.async_response
 async def ws_mark_read(hass, connection, msg):
-    """Mark a conversation as read."""
+    """Mark a conversation as read and snapshot the last-read cursor.
+
+    Phase 1 (proposal Change 3): in addition to clearing the in-memory
+    unread count, snapshot the newest stored message id at this moment
+    as the persistent read cursor. The cursor is what Phase 2's
+    ``get_messages_around`` endpoint anchors on.
+
+    ``get_messages(limit=1)`` returns ``messages[-1:]`` from the
+    chronologically-sorted store (Phase 0 made that ordering reliable
+    via ``bisect.insort``). If the conversation has no stored messages
+    yet (``recent`` empty), the cursor is left untouched — defensive
+    no-op so the ``ack``-style success response still fires.
+
+    The ``entry_id`` field on the inbound WS message is intentionally
+    NOT forwarded to ``_get_store``: the chat panel's frontend often
+    populates that field with the parent ``meshcore`` integration's
+    entry id (the panel was originally configured against that), but
+    this handler needs the chat companion's store. The chat companion
+    is single-instance per its config flow, so the ``None``-fallback
+    branch in ``_get_store`` deterministically resolves to the right
+    store. Accepting the field keeps the WS schema backwards-
+    compatible.
+    """
     tracker = hass.data.get(DOMAIN, {}).get("unread_tracker")
+    # Always use the fallback — see the docstring for the rationale.
+    store = _get_store(hass, None)
     if tracker:
         await tracker.mark_read(msg["entity_id"])
+        if store is not None:
+            recent = await store.get_messages(msg["entity_id"], limit=1)
+            if recent:
+                await tracker.set_last_read(
+                    msg["entity_id"], recent[0]["id"]
+                )
     connection.send_result(msg["id"], {"success": True})
 
 
@@ -2758,3 +2819,78 @@ async def ws_search_stored_messages(
             break
 
     connection.send_result(msg["id"], {"results": results})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "meshcore_chat/get_messages_around",
+        vol.Required("entity_id"): str,
+        vol.Required("anchor_id"): str,
+        vol.Optional("before_limit", default=25): int,
+        vol.Optional("after_limit", default=50): int,
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_messages_around(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Return a window of messages anchored on a message id.
+
+    Phase 2 of the last-read-anchor proposal (Change 5). The panel calls
+    this once per conversation open with the cursor that Phase 1's
+    ``ws_mark_read`` snapshotted, and gets back ``before_limit`` messages
+    older than the anchor + ``after_limit`` messages newer than the
+    anchor in a single round-trip. The anchor itself is included in the
+    window; ``anchor_index`` tells the frontend where to put the unread
+    divider.
+
+    Wire shape: ``{messages, anchor_index, has_more_before,
+    has_more_after, anchor_found}``. ``anchor_found`` is ``False`` when
+    the anchor id is no longer present in the conversation (R3 in the
+    proposal: pruning, manual storage deletion, or future archive
+    feature could orphan the cursor); the panel falls back to a
+    no-divider view that matches a fresh-install open.
+
+    The inbound ``entry_id`` field is intentionally NOT forwarded to
+    ``_get_store`` — it stays on the schema for backwards compatibility
+    but the handler always uses the ``None``-fallback branch. Same
+    reason as ``ws_mark_read`` (Phase 1 hot-fix 18d7aea): the chat
+    panel's frontend forwards ``this.config?.entry_id`` to every WS
+    handler, and on the dev host that resolves to the parent
+    ``meshcore`` integration's entry id rather than the chat
+    companion's. The chat companion is single-instance per its config
+    flow, so the fallback resolves deterministically.
+    """
+    # Always use the fallback — see the docstring for the rationale.
+    store = _get_store(hass, None)
+    if store is None:
+        connection.send_error(
+            msg["id"], "not_found", "No MeshCore Chat message store found"
+        )
+        return
+
+    (
+        window,
+        anchor_index,
+        has_more_before,
+        has_more_after,
+        anchor_found,
+    ) = await store.get_messages_around(
+        msg["entity_id"],
+        msg["anchor_id"],
+        before_limit=msg.get("before_limit", 25),
+        after_limit=msg.get("after_limit", 50),
+    )
+    connection.send_result(
+        msg["id"],
+        {
+            "messages": window,
+            "anchor_index": anchor_index,
+            "has_more_before": has_more_before,
+            "has_more_after": has_more_after,
+            "anchor_found": anchor_found,
+        },
+    )

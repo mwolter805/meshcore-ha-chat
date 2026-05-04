@@ -477,9 +477,17 @@ async def test_unload_entry_clears_tracker_when_last_entry(
     config_entry: MockConfigEntry,
     mock_store: MagicMock,
 ) -> None:
-    """Last-entry unload → tracker.clear() runs and store.async_unload awaited."""
+    """Last-entry unload → tracker is flushed AND cleared, store unloaded.
+
+    Phase 1 of the last-read anchor proposal added a debounced-save
+    flush on unload (R6 mitigation: HA shutdown mid-debounce must not
+    lose the cursor snapshot). Both ``_flush`` and ``clear`` fire on
+    last-entry unload — flush first so any pending write lands before
+    the in-memory counts are reset.
+    """
     tracker = MagicMock()
     tracker.clear = MagicMock()
+    tracker._flush = AsyncMock()
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket["unread_tracker"] = tracker
     # The panel-registered guard must not trip the panel-removal path
@@ -489,6 +497,7 @@ async def test_unload_entry_clears_tracker_when_last_entry(
     result = await async_unload_entry(hass, config_entry)
     assert result is True
     mock_store.async_unload.assert_awaited_once()
+    tracker._flush.assert_awaited_once()
     tracker.clear.assert_called_once()
 
 

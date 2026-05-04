@@ -184,8 +184,17 @@ async def async_setup_entry(
     # frontend identifies conversations by entity_id, which is globally
     # unique across config entries. Stash it on the domain bucket where the
     # WS handlers expect to find it (hass.data[DOMAIN]["unread_tracker"]).
+    #
+    # ``entry_id`` is wired through so the tracker's persistent
+    # ``last_read`` Store key is parametrised — see Phase 1 of the
+    # last-read anchor proposal. The Store is hydrated synchronously
+    # here so handlers reading the cursor map (``get_all_last_read``,
+    # ``get_last_read``) on first connect see the persisted state, not
+    # an empty dict.
     if "unread_tracker" not in bucket:
-        bucket["unread_tracker"] = UnreadTracker(hass)
+        tracker = UnreadTracker(hass, entry.entry_id)
+        await tracker.async_load()
+        bucket["unread_tracker"] = tracker
 
     # Register WS commands once (idempotent registration would be ideal but
     # HA's websocket_api raises on duplicate types — guard with a flag on the
@@ -255,11 +264,22 @@ async def async_unload_entry(
     if isinstance(runtime, MeshCoreChatRuntimeData):
         await runtime.store.async_unload()
 
+    # Flush any pending debounced last-read save before tearing down
+    # process-global state. The tracker is a singleton across entries,
+    # so flushing here covers the multi-entry case as well — a no-op
+    # when no debounce is pending. R6 mitigation in the Phase 1 proposal
+    # (`Last-Read Anchor and Read-Receipt Refinement for Chat Panel`):
+    # without this, a `mark_read` followed immediately by HA stop could
+    # lose the cursor snapshot inside the 2 s debounce window.
+    bucket = hass.data.get(DOMAIN, {})
+    tracker = bucket.get("unread_tracker")
+    if tracker is not None:
+        await tracker._flush()
+
     # If this was the last config entry, drop the process-global state
     # too (panel registration, UnreadTracker counts). hass.config_entries
     # still includes the entry being unloaded at this point, so exclude
     # it explicitly when checking for siblings.
-    bucket = hass.data.get(DOMAIN, {})
     other_entries = [
         e for e in hass.config_entries.async_entries(DOMAIN)
         if e.entry_id != entry.entry_id
@@ -278,8 +298,10 @@ async def async_unload_entry(
         # referenced by live WS handlers and the bus subscription) but
         # its in-memory counts are cleared so a re-added entry starts
         # fresh rather than inheriting stale counts from the previous
-        # entry.
-        tracker = bucket.get("unread_tracker")
+        # entry. ``clear()`` deliberately preserves the persistent
+        # ``_last_read`` map (locked decision 2026-05-04, Change 1) —
+        # cursors survive reload so the user doesn't lose read positions
+        # on routine integration restarts.
         if tracker is not None:
             tracker.clear()
 

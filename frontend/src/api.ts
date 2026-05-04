@@ -498,15 +498,53 @@ export async function removeContact(
 
 // ─── Unread Tracking ─────────────────────────────────────────────────────
 
-export async function getUnreadCounts(
+/**
+ * Backend response shape for ``meshcore_chat/get_unread_counts``.
+ *
+ * Phase 1 (commit 805f589) extended the WS payload from a single
+ * ``unread`` map to ``{unread, last_read}``. The ``last_read`` map is
+ * the per-entity message-ID cursor snapshotted at the most recent
+ * ``mark_read`` call (or absent if the conversation has never been
+ * marked read on this install). Phase 4's anchor-driven open consumes
+ * this map.
+ *
+ * Backwards-compatible: older clients that only read ``unread`` keep
+ * working unchanged. Newer clients (Phase 4 panel) read both.
+ */
+export interface UnreadCountsResponse {
+  unread: Record<string, number>;
+  last_read: Record<string, string>;
+}
+
+/**
+ * Fetch both unread counts and last-read cursors in one round-trip.
+ *
+ * Phase 4 sibling helper to ``getUnreadCounts`` — the panel needs the
+ * cursor map (for anchor-driven open) at the same time it needs the
+ * unread counts (for sidebar badges), and the backend already returns
+ * both fields in a single payload, so an extra WS call would be
+ * wasteful. Existing callers of ``getUnreadCounts`` that only want
+ * counts continue to work unchanged.
+ */
+export async function getUnreadAndLastRead(
   hass: HomeAssistant, entryId?: string,
-): Promise<Record<string, number>> {
+): Promise<UnreadCountsResponse> {
   try {
     const msg: Record<string, unknown> = { type: 'meshcore_chat/get_unread_counts' };
     if (entryId) msg.entry_id = entryId;
-    const result = await hass.callWS<{ unread: Record<string, number> }>(msg);
-    return result.unread || {};
-  } catch { return {}; }
+    const result = await hass.callWS<Partial<UnreadCountsResponse>>(msg);
+    return {
+      unread: result.unread || {},
+      last_read: result.last_read || {},
+    };
+  } catch { return { unread: {}, last_read: {} }; }
+}
+
+export async function getUnreadCounts(
+  hass: HomeAssistant, entryId?: string,
+): Promise<Record<string, number>> {
+  const result = await getUnreadAndLastRead(hass, entryId);
+  return result.unread;
 }
 
 export async function markConversationRead(
@@ -517,6 +555,68 @@ export async function markConversationRead(
     if (entryId) msg.entry_id = entryId;
     return await hass.callWS<{ success: boolean }>(msg);
   } catch { return { success: false }; }
+}
+
+// ─── Last-read anchor (Phase 2 backend / Phase 3 frontend) ────────────────
+
+/**
+ * Backend response shape for ``meshcore_chat/get_messages_around``.
+ *
+ * Mirrors ``ws_get_messages_around`` (Phase 2, commit 55dc791). The
+ * window includes the anchor message itself; ``anchor_index`` is the
+ * anchor's offset within ``messages``. ``has_more_before`` /
+ * ``has_more_after`` drive the symmetric lazy-load triggers in
+ * ``MessageStore.loadOlderMessages`` / ``loadNewerMessages``.
+ *
+ * R3 fallback: when the anchor isn't present in the conversation
+ * (pruned / fresh install / entity rename), the backend returns the
+ * newest ``before_limit + after_limit`` messages with
+ * ``anchor_found: false`` and ``anchor_index: messages.length`` (panel
+ * renders the divider at the bottom of the buffer).
+ */
+export interface MessagesAroundResponse {
+  messages: StoredMessage[];
+  anchor_index: number;
+  has_more_before: boolean;
+  has_more_after: boolean;
+  anchor_found: boolean;
+}
+
+/**
+ * Fetch a window of messages around an anchor message ID.
+ *
+ * Phase 3 thin wrapper around ``meshcore_chat/get_messages_around``
+ * (Phase 2 backend). Used by ``MessageStore.switchEntity(entityId,
+ * anchorId)`` to load the "last-read window" — ``beforeLimit`` messages
+ * older than the anchor + ``afterLimit`` messages newer than it, in a
+ * single round-trip.
+ *
+ * Defaults match the proposal: 25 older + 50 newer. Both limits are
+ * passed as WS payload keys (the schema is keyed via ``vol.Optional``,
+ * not positional — see Phase 2 caveat in the proposal handoff).
+ *
+ * Mirrors ``markConversationRead`` shape (no try/catch swallow — the
+ * caller decides how to handle a network failure; ``MessageStore``
+ * surfaces it as ``this._error``). The intentional unswallowed reject
+ * differs from helpers like ``getStoredMessages`` (which return a
+ * fallback empty payload) because anchor-driven open is a UX-critical
+ * path that must surface failures rather than silently render the
+ * wrong (empty) window.
+ */
+export async function getMessagesAround(
+  hass: HomeAssistant,
+  entityId: string,
+  anchorId: string,
+  beforeLimit = 25,
+  afterLimit = 50,
+): Promise<MessagesAroundResponse> {
+  return hass.callWS<MessagesAroundResponse>({
+    type: 'meshcore_chat/get_messages_around',
+    entity_id: entityId,
+    anchor_id: anchorId,
+    before_limit: beforeLimit,
+    after_limit: afterLimit,
+  });
 }
 
 // ─── Identity Management ─────────────────────────────────────────────────
