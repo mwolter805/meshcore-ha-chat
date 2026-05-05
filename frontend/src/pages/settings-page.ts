@@ -719,7 +719,7 @@ export class SettingsPage extends LitElement {
     this._error = null;
 
     try {
-      this._deviceConfig = await getDeviceConfig(this.hass, this.config?.node_prefix);
+      this._deviceConfig = await getDeviceConfig(this.hass, this.config?.entry_id);
       // Initialize location source from backend instead of defaulting to 'manual'
       if (this._deviceConfig?.location_source) {
         this._locationSource = this._deviceConfig.location_source as 'gps' | 'manual' | 'ha_location';
@@ -901,7 +901,7 @@ export class SettingsPage extends LitElement {
       <meshcore-command-dialog
         .open=${this._commandDialogOpen}
         .hass=${this.hass}
-        .entryId=${this.config?.node_prefix}
+        .entryId=${this.config?.entry_id}
         ?isLocal=${true}
         ?narrow=${this.narrow}
         @close=${this._onCommandDialogClose}>
@@ -1348,7 +1348,7 @@ export class SettingsPage extends LitElement {
     this._saving = true;
 
     try {
-      const result = await setDeviceConfig(this.hass, settings, this.config?.node_prefix);
+      const result = await setDeviceConfig(this.hass, settings, this.config?.entry_id);
       if (result.success) {
         // Optimistically update local config with the values just applied.
         // Radio settings won't be reflected by send_appstart() until a reboot,
@@ -1442,7 +1442,7 @@ export class SettingsPage extends LitElement {
   private async _executeDeviceCommand(command: string) {
     if (!this.hass) return;
     try {
-      const result = await executeLocal(this.hass, command, undefined, this.config?.node_prefix);
+      const result = await executeLocal(this.hass, command, undefined, this.config?.entry_id);
       if (!result.success) {
         this._showStatusMessage(`Command failed: ${result.response}`, 'error');
       } else {
@@ -1481,7 +1481,7 @@ export class SettingsPage extends LitElement {
       }
 
       if (Object.keys(settings).length > 0) {
-        const result = await setDeviceConfig(this.hass, settings, this.config?.node_prefix);
+        const result = await setDeviceConfig(this.hass, settings, this.config?.entry_id);
         if (!result.success) {
           this._showStatusMessage('Failed to save coordinates', 'error');
           return;
@@ -1501,7 +1501,7 @@ export class SettingsPage extends LitElement {
       }
 
       // Apply location source
-      const sourceResult = await setLocationSource(this.hass, this._locationSource, this.config?.node_prefix);
+      const sourceResult = await setLocationSource(this.hass, this._locationSource, this.config?.entry_id);
       if (!sourceResult.success) {
         this._showStatusMessage('Failed to update location source', 'error');
         return;
@@ -1529,8 +1529,8 @@ export class SettingsPage extends LitElement {
         this._closeKeyManagementModal();
         this._startIdentityFlow('regenerate', {
           type: 'meshcore_chat/regenerate_identity',
-          payload: this.config?.node_prefix
-            ? { entry_id: this.config.node_prefix }
+          payload: this.config?.entry_id
+            ? { entry_id: this.config.entry_id }
             : {},
         });
       },
@@ -1566,7 +1566,7 @@ export class SettingsPage extends LitElement {
     this._closeKeyManagementModal();
     this._importKeyValue = '';
     const payload: Record<string, unknown> = { private_key: sanitized };
-    if (this.config?.node_prefix) payload.entry_id = this.config.node_prefix;
+    if (this.config?.entry_id) payload.entry_id = this.config.entry_id;
     this._startIdentityFlow('import', {
       type: 'meshcore_chat/import_identity',
       payload,
@@ -1968,7 +1968,7 @@ export class SettingsPage extends LitElement {
     const displayName = label || command;
 
     try {
-      const result = await executeLocal(this.hass, command, args, this.config?.node_prefix);
+      const result = await executeLocal(this.hass, command, args, this.config?.entry_id);
       this._showStatusMessage(`Companion: ${displayName} → ${result.response || 'OK'}`, 'success');
     } catch (error) {
       this._showStatusMessage(`Companion: ${displayName} failed — ${String(error)}`, 'error');

@@ -62,36 +62,53 @@ export async function getChannels(
 }
 
 /**
- * Send a message to a channel
+ * Send a message to a channel.
+ *
+ * Phase 4.5 (forensics Fix 5): the optional ``entryId`` is forwarded as
+ * ``entry_id`` in the upstream ``meshcore.send_channel_message`` service
+ * call so the message routes to the selected upstream coordinator. When
+ * omitted, the upstream service iterates ``hass.data[meshcore]`` and
+ * sends from the FIRST connected coordinator — which on multi-entry
+ * setups is whichever happens to be first in dict-iteration order, not
+ * the one the user has selected in the panel header.
  */
 export async function sendChannelMessage(
   hass: HomeAssistant,
   channelIdx: number,
   message: string,
+  entryId?: string,
 ): Promise<void> {
   try {
-    await hass.callService('meshcore', 'send_channel_message', {
+    const data: Record<string, unknown> = {
       channel_idx: channelIdx,
       message,
-    });
+    };
+    if (entryId) data.entry_id = entryId;
+    await hass.callService('meshcore', 'send_channel_message', data);
   } catch (error) {
     throw new Error(`Failed to send channel message: ${String(error)}`);
   }
 }
 
 /**
- * Send a direct message to a contact by pubkey prefix
+ * Send a direct message to a contact by pubkey prefix.
+ *
+ * Phase 4.5 (forensics Fix 5): see ``sendChannelMessage`` above for the
+ * rationale on threading ``entryId`` through to upstream ``meshcore.send_message``.
  */
 export async function sendDirectMessage(
   hass: HomeAssistant,
   pubkeyPrefix: string,
   message: string,
+  entryId?: string,
 ): Promise<void> {
   try {
-    await hass.callService('meshcore', 'send_message', {
+    const data: Record<string, unknown> = {
       pubkey_prefix: pubkeyPrefix,
       message,
-    });
+    };
+    if (entryId) data.entry_id = entryId;
+    await hass.callService('meshcore', 'send_message', data);
   } catch (error) {
     throw new Error(`Failed to send direct message: ${String(error)}`);
   }

@@ -470,6 +470,22 @@ export class ChatPage extends LitElement {
     }
     if (changedProperties.has('config') && this.config && this._messageStore) {
       this._messageStore.setConfig(this.config);
+      // Phase 4.6: when the panel-header entry switch lands a new
+      // config here (entry_id changed), re-resolve _currentEntityId
+      // by re-running _onConversationSelected() — otherwise selectedId
+      // stays the same and the chat view keeps displaying the previous
+      // entry's _ch_<idx>_messages (or _<pubkey6>_messages for DMs).
+      // Only fire when entry_id specifically changed; avoids spurious
+      // re-fetches when other config props tick (e.g., node_name
+      // updates after identity rename).
+      const previousConfig = changedProperties.get('config') as PanelConfig | undefined;
+      if (
+        this.selectedId
+        && previousConfig
+        && previousConfig.entry_id !== this.config.entry_id
+      ) {
+        this._onConversationSelected();
+      }
     }
     if (changedProperties.has('selectedId')) {
       this._onConversationSelected();
@@ -537,6 +553,7 @@ export class ChatPage extends LitElement {
               .conversations=${this.conversations}
               .activeId=${this.selectedId}
               .unreadCounts=${this.unreadCounts}
+              .nodePrefix=${this.config?.node_prefix || null}
               @conversation-selected=${(e: CustomEvent) => {
                 const newId = e.detail.id;
                 if (newId === this.selectedId) {
@@ -570,6 +587,7 @@ export class ChatPage extends LitElement {
           .conversations=${this.conversations}
           .activeId=${this.selectedId}
           .unreadCounts=${this.unreadCounts}
+          .nodePrefix=${this.config?.node_prefix || null}
           @conversation-selected=${(e: CustomEvent) => {
             const newId = e.detail.id;
             if (newId === this.selectedId) {
@@ -951,9 +969,14 @@ export class ChatPage extends LitElement {
         this._pendingScroll = 'bottom';
       }
 
-      // Send via service
+      // Send via service.
+      // Phase 4.5 (forensics Fix 5): thread the selected entry's id
+      // through so upstream `meshcore.send_*` routes to the right
+      // coordinator. Without entry_id, the upstream service sends from
+      // whichever coordinator is iterated first in `hass.data[meshcore]`.
+      const entryId = this.config?.entry_id;
       if (this._isContact()) {
-        await sendDirectMessage(this.hass, this.selectedId, text);
+        await sendDirectMessage(this.hass, this.selectedId, text, entryId);
       } else {
         const idx = parseInt(this.selectedId, 10);
         if (isNaN(idx) || idx < 0 || idx > 255) {
@@ -961,7 +984,7 @@ export class ChatPage extends LitElement {
           this._inputText = text;
           return;
         }
-        await sendChannelMessage(this.hass, idx, text);
+        await sendChannelMessage(this.hass, idx, text, entryId);
       }
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -1301,14 +1324,23 @@ export class ChatPage extends LitElement {
     if (this._currentEntityId && this.unreadCounts[this._currentEntityId]) {
       return this.unreadCounts[this._currentEntityId];
     }
-    // Fallback: match using entity naming patterns
+    // Fallback: match using entity naming patterns.
+    // Phase 4 (F-B): Channel matches require the node_prefix to avoid
+    // cross-entry contamination on same-numbered channels. When node_prefix
+    // is unavailable (initial render before config arrives, or single-entry
+    // installs), fall back to suffix-only match for back-compat.
+    const nodePrefix = this.config?.node_prefix;
     for (const [entityId, count] of Object.entries(this.unreadCounts)) {
       if (count <= 0) continue;
       if (/^\d+$/.test(this.selectedId)) {
-        // Channel: match _ch_{idx}_messages
-        if (entityId.endsWith(`_ch_${this.selectedId}_messages`)) return count;
+        // Channel: match _ch_{idx}_messages, scoped by node_prefix when known
+        if (nodePrefix) {
+          if (entityId.endsWith(`meshcore_${nodePrefix}_ch_${this.selectedId}_messages`)) return count;
+        } else if (entityId.endsWith(`_ch_${this.selectedId}_messages`)) {
+          return count;
+        }
       } else {
-        // Contact: match _{first6chars}_messages
+        // Contact: match _{first6chars}_messages (globally unique)
         const prefix6 = this.selectedId.substring(0, 6);
         if (entityId.endsWith(`_${prefix6}_messages`)) return count;
       }

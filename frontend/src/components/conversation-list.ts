@@ -10,6 +10,7 @@ export class ConversationList extends LitElement {
   @property({ type: Array }) conversations: Array<Contact | Channel> = [];
   @property({ type: String }) activeId: string | null = null;
   @property({ type: Object }) unreadCounts: Record<string, number> = {};
+  @property({ type: String }) nodePrefix: string | null = null;
 
   @state() private _activeFilter: ChatFilter = 'all';
   @state() private _filteredConversations: Array<Contact | Channel> = [];
@@ -393,13 +394,29 @@ export class ConversationList extends LitElement {
     // or binary_sensor.meshcore_1ed4c1_fe3af5_messages).
     // Match using the specific entity suffix pattern to avoid false positives
     // (e.g., channel "1" matching inside any entity containing the digit "1").
+    //
+    // Phase 4 (F-B): Channel matches additionally require the entry's
+    // pubkey-prefix segment; otherwise same-named channels on different
+    // upstream entries cross-contaminate (e.g., entry A's #test count
+    // appearing on entry B's #test). When nodePrefix is null (single-
+    // entry installs, or initial render before config arrives), fall
+    // back to the suffix-only match for backwards compatibility.
+    const channelNeedle = this.nodePrefix
+      ? `meshcore_${this.nodePrefix}_ch_${id}_messages`
+      : null;
     for (const [entityId, count] of Object.entries(this.unreadCounts)) {
       if (count <= 0) continue;
       // Channel: id is a numeric string like "1" → match _ch_1_messages
       if (/^\d+$/.test(id)) {
-        if (entityId.endsWith(`_ch_${id}_messages`)) return count;
+        if (channelNeedle) {
+          if (entityId.endsWith(channelNeedle)) return count;
+        } else if (entityId.endsWith(`_ch_${id}_messages`)) {
+          return count;
+        }
       } else {
-        // Contact: id is a hex pubkey prefix (12 chars) → match _{first6}_messages
+        // Contact: id is a hex pubkey prefix (12 chars) → match _{first6}_messages.
+        // Contact pubkey prefixes are globally unique across entries,
+        // so node_prefix scoping is unnecessary here.
         const prefix6 = id.substring(0, 6);
         if (entityId.endsWith(`_${prefix6}_messages`)) return count;
       }

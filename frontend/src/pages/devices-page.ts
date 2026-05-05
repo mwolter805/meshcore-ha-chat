@@ -723,7 +723,7 @@ export class DevicesPage extends LitElement {
       <meshcore-command-dialog
         .open=${this._commandDialogOpen}
         .hass=${this.hass}
-        .entryId=${this.config?.node_prefix}
+        .entryId=${this.config?.entry_id}
         .targetPrefix=${this._commandDialogTarget}
         ?isLocal=${this._commandDialogIsLocal}
         ?narrow=${this.narrow}
@@ -1088,7 +1088,7 @@ export class DevicesPage extends LitElement {
     };
 
     try {
-      const neighbors = await getNeighbors(this.hass, device.pubkey_prefix, this.config?.node_prefix);
+      const neighbors = await getNeighbors(this.hass, device.pubkey_prefix, this.config?.entry_id);
       let chartData: Array<{ timestamp: number; values: Record<string, number> }> = [];
 
       // Fetch SNR history if neighbors have entity_ids
@@ -1158,7 +1158,7 @@ export class DevicesPage extends LitElement {
     try {
       this._loading = true;
       this._error = null;
-      const result = await getManagedDevices(this.hass, this.config?.node_prefix);
+      const result = await getManagedDevices(this.hass, this.config?.entry_id);
       this._managedDevices = result;
       // Load contacts in parallel so the Location hero tile has fallback
       // lat/lon for managed devices that don't expose location sensors.
@@ -1174,7 +1174,7 @@ export class DevicesPage extends LitElement {
   private async _loadContacts() {
     if (!this.hass) return;
     try {
-      const entryId = this.selectedDevice?.entry_id || this.config?.node_prefix;
+      const entryId = this.selectedDevice?.entry_id || this.config?.entry_id;
       const contacts = await getContacts(this.hass, entryId);
       const indexed: Record<string, Contact> = {};
       for (const c of contacts) {
@@ -1192,7 +1192,7 @@ export class DevicesPage extends LitElement {
     if (!this.hass) return;
 
     try {
-      const result = await executeRemote(this.hass, device.pubkey_prefix, command, this.config?.node_prefix);
+      const result = await executeRemote(this.hass, device.pubkey_prefix, command, this.config?.entry_id);
       this._showStatusMessage(`${device.name}: ${command} → ${result.response || 'OK'}`, 'success');
     } catch (error) {
       this._showStatusMessage(`${device.name}: ${command} failed — ${String(error)}`, 'error');
@@ -1436,7 +1436,7 @@ export class DevicesPage extends LitElement {
     try {
       const result: any = await this.hass.callWS({
         type: 'meshcore_chat/remove_neighbor',
-        entry_id: this.config?.node_prefix,
+        entry_id: this.config?.entry_id,
         target_prefix: repeaterPubkey,
         neighbor_pubkey: neighborPubkey,
       });

@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { Contact, Channel, HomeAssistant } from '../types';
+import type { Contact, Channel, HomeAssistant, PanelConfig } from '../types';
 import {
   getContactsPaginated, getNodeCounts, clearDiscoveredContacts,
 } from '../api';
@@ -39,7 +39,7 @@ export class NodesPage extends LitElement {
   // managedDevices removed — devices now live on the Devices tab
   @property({ type: Boolean }) narrow = false;
   @property({ type: Object }) hass?: HomeAssistant;
-  @property({ type: Object }) config?: any;
+  @property({ type: Object }) config?: PanelConfig;
   private _mediaQuery?: MediaQueryList;
   @state() private _viewportNarrow = false;
 
@@ -421,6 +421,16 @@ export class NodesPage extends LitElement {
       this.setAttribute('narrow', '');
     } else {
       this.removeAttribute('narrow');
+    }
+    // When the panel switches between upstream meshcore entries, the
+    // panel rebuilds `config` (new entry_id). Reset the per-page filter
+    // results and re-fetch counts + page so the displayed grid reflects
+    // the new entry rather than stale data from the previous one.
+    if (changedProperties.has('config')) {
+      this._displayedContacts = [];
+      this._totalCount = 0;
+      this._loadCounts();
+      this._loadPage(true);
     }
   }
 
