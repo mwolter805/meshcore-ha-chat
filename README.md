@@ -6,9 +6,9 @@ A sidebar chat panel and persistent message store for the [MeshCore](https://mes
 
 Works as a **companion** to the [core meshcore integration](https://github.com/meshcore-dev/meshcore-ha) — install both. This integration does not drive the radio itself; it adds a chat UI, message persistence, and search on top of the events and services exposed by the core integration.
 
-> **Status:** v0.1 in active development.
+> **Status:** v0.2 in active development.
 
-## Features (v0.1)
+## Features (v0.2)
 
 - Sidebar chat panel with channels, DMs, and contact list
 - Persistent message history (survives Home Assistant restarts)
@@ -133,8 +133,7 @@ For a walkthrough of common tasks (adding contacts, managing channels, issuing c
 
 - **Requires meshcore ≥ 2.6.0.** Older versions fall back to direct coordinator reads where supported, but Trace and Get Contacts use upstream services that landed in 2.6.0.
 - **Message archive is not a long-term log.** Default retention is 90 days, capped at 500 messages per conversation. Configurable via Settings → MeshCore Chat → Configure (range 1–365 days, 50–5000 messages).
-- **Path-discovery traces don't always return.** Multi-hop flood discovery sometimes silently drops; if a normal trace fails, use the explicit-path option in the trace dialog and supply the comma-hex hop sequence manually.
-- **Channel keys are stored in the clear in HA's `.storage`.** Backups encrypt at rest if HA's backup encryption is enabled; otherwise channel keys are recoverable from a stolen backup.
+- **Discover-mode traces don't always return.** Flood path discovery on multi-hop routes sometimes silently drops. If a **Discover** trace fails, switch to **Select repeaters** or **Enter path** in the trace dialog to specify the route explicitly.
 
 ## Removal
 
