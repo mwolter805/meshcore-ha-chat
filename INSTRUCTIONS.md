@@ -21,6 +21,30 @@ The header carries a device switcher (when more than one upstream `meshcore` con
 
 ---
 
+## Permissions
+
+Most of the panel is usable by any authenticated Home Assistant user — reading messages, viewing sensor history, browsing the Nodes tab, opening dialogs, and searching all work without elevated privileges.
+
+The actions below are restricted to users with **administrator** rights on your HA instance (Settings → People → Users → click user → toggle **Administrator**). If a non-admin user triggers one of these, the WebSocket call returns an `unauthorized` error envelope and the panel shows an error toast — no change is made.
+
+**Admin-only actions:**
+
+| Where in the panel | Action |
+|---|---|
+| Settings → radio configuration | Change TX power, frequency, bandwidth, spreading factor, coding rate, path-hash mode |
+| Settings → device profile | Rename the companion · change location source |
+| Settings → Key Management | Regenerate identity · Import identity |
+| Companion → Issue Command | Send any command to the local companion |
+| Devices tab → Issue Command | Send any command to a managed remote device |
+| Manage → Contacts | Add / Remove / Block · Clear Discovered |
+| Manage → Channels | Add / Edit / Remove (incl. channel-key changes) |
+| Devices → neighbor table | Remove neighbor · Cleanup stale neighbors |
+| Node detail → Trace | Run a path trace (sends packets, costs mesh airtime) |
+
+This is enforced at the WebSocket layer, not just the UI — a hand-crafted WS request from a non-admin user is rejected the same way.
+
+---
+
 ## Common tasks
 
 ### Adding a contact (Discovered → Added)

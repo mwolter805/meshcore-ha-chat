@@ -110,6 +110,8 @@ Copy `custom_components/meshcore_chat/` into your HA `config/custom_components/`
 
 For a walkthrough of common tasks (adding contacts, managing channels, issuing commands, tracing paths, changing radio settings) plus operational warnings (radio-reboot requirements, the entity_id rename gotcha), see [INSTRUCTIONS.md](./INSTRUCTIONS.md).
 
+> **Permissions.** Reading messages and browsing the panel works for any authenticated HA user. **Destructive actions** — radio reconfiguration, identity regeneration, channel-key changes, issuing commands, adding / removing / blocking contacts, and running path traces — require **administrator** rights on your HA instance. See [INSTRUCTIONS.md → Permissions](./INSTRUCTIONS.md#permissions) for the full list.
+
 ## Requirements
 
 - Home Assistant 2024.12 or newer
@@ -145,6 +147,65 @@ To uninstall:
    ```
    The archive is per-entry; deleting the config entry does not remove these files automatically (HA's standard behaviour). Skip this step if you intend to re-add the integration later — the archive will be re-attached.
 3. If you also want to uninstall the underlying meshcore integration: Settings → Devices & Services → MeshCore → Delete, then remove `custom_components/meshcore` (HACS or manual).
+
+## Development
+
+Contributions and bug reports welcome — file issues at [github.com/mwolter805/meshcore-ha-chat/issues](https://github.com/mwolter805/meshcore-ha-chat/issues).
+
+### Repo layout
+
+- `custom_components/meshcore_chat/` — the Home Assistant integration (Python).
+- `frontend/` — the Lit-based sidebar panel (TypeScript). Rolled up into a single bundle that lands at `custom_components/meshcore_chat/meshcore-chat-panel.js`.
+- `tests/` — Python test suite (pytest + `pytest-homeassistant-custom-component`).
+- `frontend/tests/` — frontend unit tests (vitest).
+
+### Python tests
+
+The integration targets the Python version shipped in the current HA OS / Docker image (3.14 as of HA 2025.x). Set up a local venv:
+
+```bash
+cd meshcore-ha-chat
+uv venv --python 3.14 .venv
+.venv/bin/pip install pytest-homeassistant-custom-component
+```
+
+`pytest-homeassistant-custom-component` (PHACC) transitively pulls in Home Assistant core, pytest, pytest-asyncio, and the full HA test fixture surface — no other install steps are needed. The integration is **not** installed as a package; `tests/conftest.py` puts the repo root on `sys.path` so `custom_components.meshcore_chat.*` is importable directly.
+
+Run the suite:
+
+```bash
+.venv/bin/pytest tests/                    # full suite (~1s)
+.venv/bin/pytest tests/components/meshcore_chat/test_ws_api.py -k identity
+```
+
+> **Do not** `pip install -e .[test]` (or any pip install) inside a running Home Assistant Docker container. The editable-install metadata persists across `pip uninstall` and crashes HA on the next restart with `FileNotFoundError` from `async_get_custom_components`. Always use a separate venv.
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run build       # production bundle (minified)
+npm run dev         # rollup watch mode
+npm test            # vitest, run once
+npm run test:watch  # vitest in watch mode
+npm run lint        # eslint
+```
+
+The build writes straight to `../custom_components/meshcore_chat/meshcore-chat-panel.js`. Committing the rebuilt bundle does not deploy it — for that, see below.
+
+### Deploying a dev build to a live HA host
+
+After `npm run build`, copy the rebuilt panel bundle to your HA host:
+
+```bash
+scp custom_components/meshcore_chat/meshcore-chat-panel.js \
+    root@<ha-host>:/config/custom_components/meshcore_chat/
+```
+
+Then **hard-refresh** the panel in the browser (Cmd/Ctrl-Shift-R). No Home Assistant restart is needed for frontend-only changes — the panel is reloaded from disk on browser refresh.
+
+For Python-side changes (anything under `custom_components/meshcore_chat/*.py`), SCP the changed files and reload the integration: **Settings → Devices & Services → MeshCore Chat → ⋮ → Reload**, or restart HA if the change touches `__init__.py`, the config-flow, or anything wired at setup time.
 
 ## Tips & Troubleshooting
 
