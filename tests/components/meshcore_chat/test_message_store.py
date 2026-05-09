@@ -345,6 +345,130 @@ async def test_ensure_loaded_runs_backfill_on_first_load(
         await s.async_unload()
 
 
+# ─── count_unread_after (Cursor-Derived Unread Count, Phase 1) ─────────
+
+
+async def _seed_alpha_beta(store: MessageStore, eid: str) -> None:
+    """Seed five chronological messages with mixed inbound/outgoing."""
+    msgs = [
+        {"id": "m1", "timestamp": "2026-05-01T10:00:00", "outgoing": False, "sender": "Alice", "text": "in1"},
+        {"id": "m2", "timestamp": "2026-05-01T10:01:00", "outgoing": True,  "sender": "Me",    "text": "out1"},
+        {"id": "m3", "timestamp": "2026-05-01T10:02:00", "outgoing": False, "sender": "Alice", "text": "in2"},
+        {"id": "m4", "timestamp": "2026-05-01T10:03:00", "outgoing": False, "sender": "Alice", "text": "in3"},
+        {"id": "m5", "timestamp": "2026-05-01T10:04:00", "outgoing": True,  "sender": "Me",    "text": "out2"},
+    ]
+    for m in msgs:
+        await store.store_message(eid, m)
+
+
+async def test_count_unread_after_with_no_cursor_counts_all_inbound(
+    store: MessageStore,
+) -> None:
+    """``cursor_id=None`` returns the total inbound count.
+
+    Fresh-install / never-read fallback. Inbound = ``not outgoing``;
+    out of 5 seeded messages, 3 are inbound (m1, m3, m4).
+    """
+    eid = "binary_sensor.fresh"
+    await _seed_alpha_beta(store, eid)
+    assert await store.count_unread_after(eid, None) == 3
+
+
+async def test_count_unread_after_with_cursor_counts_strictly_newer(
+    store: MessageStore,
+) -> None:
+    """Cursor at m2 → m3 and m4 are newer inbound (m5 is outgoing)."""
+    eid = "binary_sensor.cursor"
+    await _seed_alpha_beta(store, eid)
+    # m2 is the cursor; m3, m4 are newer inbound; m5 is newer outgoing.
+    assert await store.count_unread_after(eid, "m2") == 2
+
+
+async def test_count_unread_after_returns_zero_when_cursor_at_tail(
+    store: MessageStore,
+) -> None:
+    """Cursor at the chronologically-newest message → 0 unread.
+
+    R6 in the proposal: an outgoing message stored after a fully-read
+    state must not bump the badge. m5 is the newest message; counting
+    after m5 returns 0 regardless of m5's outgoing status.
+    """
+    eid = "binary_sensor.tail"
+    await _seed_alpha_beta(store, eid)
+    assert await store.count_unread_after(eid, "m5") == 0
+
+
+async def test_count_unread_after_orphan_cursor_falls_back_to_all_inbound(
+    store: MessageStore,
+) -> None:
+    """Cursor not found in store → fallback to all-inbound count.
+
+    R1 in the proposal: matches the divider's anchor-not-found path
+    so the badge and the divider stay consistent. A pruned-or-orphaned
+    cursor produces the same all-inbound count as a never-read
+    conversation; cosmetically the badge inflates after extreme
+    retention pruning, which is correct (1000+ messages have arrived
+    since the last read).
+    """
+    eid = "binary_sensor.orphan"
+    await _seed_alpha_beta(store, eid)
+    assert await store.count_unread_after(eid, "msg_does_not_exist") == 3
+
+
+async def test_count_unread_after_filters_outgoing(
+    store: MessageStore,
+) -> None:
+    """Outgoing messages never count, regardless of cursor.
+
+    Pin the ``not m.get('outgoing', False)`` filter — matches the
+    legacy in-memory counter's behavior of incrementing only on
+    inbound (R6).
+    """
+    eid = "binary_sensor.outgoing"
+    # Three outgoing-only messages.
+    for i, ts in enumerate(("10:00", "10:01", "10:02")):
+        await store.store_message(
+            eid,
+            {
+                "id": f"o{i}",
+                "timestamp": f"2026-05-01T{ts}:00",
+                "outgoing": True,
+                "sender": "Me",
+                "text": f"out{i}",
+            },
+        )
+    assert await store.count_unread_after(eid, None) == 0
+    assert await store.count_unread_after(eid, "o0") == 0
+
+
+async def test_count_unread_after_treats_missing_outgoing_as_inbound(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Defensive: a record without an ``outgoing`` field counts as inbound.
+
+    The legacy counter relied on ``not record["outgoing"]`` (KeyError
+    on missing). ``count_unread_after`` uses the more defensive
+    ``not m.get("outgoing", False)``: missing → False → counted as
+    inbound. Semantically matches the legacy ``not False`` branch and
+    hardens against future callers that omit the field.
+    """
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    try:
+        # Bypass store_message so we don't normalize the record.
+        eid = "binary_sensor.legacy"
+        s._loaded_conversations[eid] = [
+            {"id": "x1", "timestamp": "2026-05-01T10:00:00"},  # no `outgoing`
+            {"id": "x2", "timestamp": "2026-05-01T10:01:00", "outgoing": True},
+        ]
+        # x1 is treated as inbound; x2 as outgoing → count_unread_after(None) == 1.
+        assert await s.count_unread_after(eid, None) == 1
+        # Cursor at x1 → only x2 newer, which is outgoing → 0.
+        assert await s.count_unread_after(eid, "x1") == 0
+    finally:
+        await s.async_unload()
+
+
 # ─── update_message_delivery / _rx_data ────────────────────────────────
 
 

@@ -42,7 +42,7 @@ from .const import (
 )
 from .message_store import MessageStore
 from .panel import async_register_panel, async_remove_panel
-from .unread_tracking import UnreadTracker
+from .unread_tracking import EVENT_UNREAD_UPDATED, UnreadTracker
 from .utils import enrich_rx_log_entries
 
 _LOGGER = logging.getLogger(__name__)
@@ -429,14 +429,28 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
 
         await store.store_message(entity_id, record)
 
-        # Inbound (non-outgoing) messages increment the unread count for
-        # this conversation. Frontend listens on EVENT_UNREAD_UPDATED and
-        # updates the per-conversation badge; the panel calls
-        # meshcore_chat/mark_conversation_read to clear it on read.
+        # Inbound (non-outgoing) messages may have advanced the unread
+        # count for this conversation. Compute the new derived count
+        # from the store + persistent cursor and fire
+        # EVENT_UNREAD_UPDATED with the new count attached so the
+        # panel's `_loadUnreadCounts` round-trip sees the updated value
+        # on refetch. Phase 1 of `Cursor-Derived Unread Count and Mark-
+        # Read Gate Fix` (2026-05-08): replaces the prior
+        # `tracker.mark_unread(entity_id)` call. The derivation reads
+        # from `store` (which has just been written to via
+        # `store.store_message` above) so the count reflects the post-
+        # write state. Eliminates the desync class where the in-memory
+        # counter reset on HA restart while the persistent cursor
+        # survived.
         if not record["outgoing"]:
             tracker = hass.data.get(DOMAIN, {}).get("unread_tracker")
             if tracker is not None:
-                await tracker.mark_unread(entity_id)
+                cursor = tracker.get_last_read(entity_id)
+                new_count = await store.count_unread_after(entity_id, cursor)
+                hass.bus.async_fire(
+                    EVENT_UNREAD_UPDATED,
+                    {"entity_id": entity_id, "unread_count": new_count},
+                )
 
     return _handle
 

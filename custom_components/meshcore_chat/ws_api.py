@@ -1747,8 +1747,8 @@ async def ws_cleanup_stale_neighbors(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
-@callback
-def ws_get_unread_counts(hass, connection, msg):
+@websocket_api.async_response
+async def ws_get_unread_counts(hass, connection, msg):
     """Return unread counts and last-read cursors, optionally scoped to one entry.
 
     Phase 1 (proposal Change 4): the payload now includes a ``last_read``
@@ -1766,6 +1766,16 @@ def ws_get_unread_counts(hass, connection, msg):
     surfaces a clean empty state instead of cross-contaminated counts
     from other entries. Omitted ``entry_id`` returns the full
     process-wide map (legacy / cross-entry rollup callers).
+
+    Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read
+    Gate Fix` (2026-05-08): the ``unread`` map is now derived from the
+    persistent cursor + the message store rather than read from a
+    separate in-memory counter. The wire shape
+    (``{"unread": ..., "last_read": ...}``) is unchanged — entries
+    with derived count > 0 are emitted, count == 0 is omitted, exactly
+    matching the legacy behavior of ``get_all_unread()`` (which
+    filtered ``v > 0``). Eliminates the desync class where the badge
+    reset on HA restart while the cursor survived.
     """
     tracker = hass.data.get(DOMAIN, {}).get("unread_tracker")
     if not tracker:
@@ -1774,8 +1784,20 @@ def ws_get_unread_counts(hass, connection, msg):
         # whether the tracker is initialised.
         connection.send_result(msg["id"], {"unread": {}, "last_read": {}})
         return
-    unread = tracker.get_all_unread()
     last_read = tracker.get_all_last_read()
+    store = _get_store(hass, None)
+    unread: dict[str, int] = {}
+    if store is not None:
+        # Walk every conversation the store knows about — the index
+        # surfaces entity_ids without forcing a full conversation load.
+        # ``count_unread_after`` lazy-loads the per-conversation file on
+        # first count, but each conversation is loaded at most once per
+        # round and cached for subsequent calls within this handler.
+        for entity_id in list(store.get_message_index().keys()):
+            cursor = last_read.get(entity_id)
+            count = await store.count_unread_after(entity_id, cursor)
+            if count > 0:
+                unread[entity_id] = count
     entry_id = msg.get("entry_id")
     if entry_id is not None:
         coord = _resolve_coordinator(hass, entry_id)
@@ -1820,6 +1842,16 @@ async def ws_mark_read(hass, connection, msg):
     yet (``recent`` empty), the cursor is left untouched — defensive
     no-op so the ``ack``-style success response still fires.
 
+    Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read
+    Gate Fix` (2026-05-08): the prior two-call sequence
+    (``tracker.mark_read(entity_id)`` to clear the in-memory counter
+    + ``tracker.set_last_read(entity_id, msg_id)`` to advance the
+    cursor) collapses into a single ``mark_read(entity_id, msg_id)``
+    call. The in-memory counter is gone — counts are derived from the
+    cursor + store on demand. The single call advances the cursor,
+    fires ``EVENT_UNREAD_UPDATED`` with ``unread_count=0``, and
+    schedules the debounced disk save.
+
     The ``entry_id`` field on the inbound WS message is intentionally
     NOT forwarded to ``_get_store``: the chat panel's frontend often
     populates that field with the parent ``meshcore`` integration's
@@ -1834,13 +1866,15 @@ async def ws_mark_read(hass, connection, msg):
     # Always use the fallback — see the docstring for the rationale.
     store = _get_store(hass, None)
     if tracker:
-        await tracker.mark_read(msg["entity_id"])
+        # Resolve the new cursor from the store's chronologically-newest
+        # stored message. ``None`` (no messages yet) leaves the cursor
+        # untouched inside ``mark_read`` — defensive no-op.
+        new_cursor: str | None = None
         if store is not None:
             recent = await store.get_messages(msg["entity_id"], limit=1)
             if recent:
-                await tracker.set_last_read(
-                    msg["entity_id"], recent[0]["id"]
-                )
+                new_cursor = recent[0]["id"]
+        await tracker.mark_read(msg["entity_id"], new_cursor)
     connection.send_result(msg["id"], {"success": True})
 
 

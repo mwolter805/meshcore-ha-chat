@@ -285,15 +285,30 @@ async def test_message_handler_outgoing_without_ack_marks_sent(
     assert record["delivery_status"] == "sent"
 
 
-async def test_message_handler_inbound_increments_unread_tracker(
+async def test_message_handler_inbound_fires_derived_unread_event(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     mock_store: MagicMock,
 ) -> None:
-    """Inbound (non-outgoing) messages mark the conversation unread."""
+    """Inbound (non-outgoing) messages fire EVENT_UNREAD_UPDATED.
+
+    Phase 1 of `Cursor-Derived Unread Count and Mark-Read Gate Fix`
+    (2026-05-08): replaces the prior ``tracker.mark_unread`` call. The
+    handler now reads the persistent cursor, asks the message store
+    for the count of inbound messages newer than the cursor, and fires
+    the bus event with that count attached. The tracker is no longer
+    mutated by the message-arrival path.
+    """
     tracker = MagicMock()
-    tracker.mark_unread = AsyncMock()
+    tracker.get_last_read = MagicMock(return_value="msg_seed")
     hass.data.setdefault(DOMAIN, {})["unread_tracker"] = tracker
+    mock_store.count_unread_after = AsyncMock(return_value=7)
+
+    events: list[dict] = []
+    hass.bus.async_listen(
+        "meshcore_unread_updated",
+        lambda e: events.append(dict(e.data)),
+    )
 
     handler = _make_message_handler(hass, config_entry.entry_id)
     await handler(_make_event({
@@ -303,18 +318,33 @@ async def test_message_handler_inbound_increments_unread_tracker(
         "timestamp": "t",
         "outgoing": False,
     }))
-    tracker.mark_unread.assert_awaited_once_with("binary_sensor.alice")
+    await hass.async_block_till_done()
+
+    tracker.get_last_read.assert_called_once_with("binary_sensor.alice")
+    mock_store.count_unread_after.assert_awaited_once_with(
+        "binary_sensor.alice", "msg_seed"
+    )
+    assert events == [
+        {"entity_id": "binary_sensor.alice", "unread_count": 7},
+    ]
 
 
-async def test_message_handler_outgoing_does_not_increment_unread(
+async def test_message_handler_outgoing_does_not_fire_unread(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     mock_store: MagicMock,
 ) -> None:
-    """Outgoing messages must not bump the unread counter."""
+    """Outgoing messages must not fire ``EVENT_UNREAD_UPDATED``."""
     tracker = MagicMock()
-    tracker.mark_unread = AsyncMock()
+    tracker.get_last_read = MagicMock(return_value=None)
     hass.data.setdefault(DOMAIN, {})["unread_tracker"] = tracker
+    mock_store.count_unread_after = AsyncMock(return_value=0)
+
+    events: list[dict] = []
+    hass.bus.async_listen(
+        "meshcore_unread_updated",
+        lambda e: events.append(dict(e.data)),
+    )
 
     handler = _make_message_handler(hass, config_entry.entry_id)
     await handler(_make_event({
@@ -324,7 +354,11 @@ async def test_message_handler_outgoing_does_not_increment_unread(
         "timestamp": "t",
         "outgoing": True,
     }))
-    tracker.mark_unread.assert_not_called()
+    await hass.async_block_till_done()
+
+    tracker.get_last_read.assert_not_called()
+    mock_store.count_unread_after.assert_not_called()
+    assert events == []
 
 
 # ─── _make_delivery_update_handler ─────────────────────────────────────

@@ -1334,34 +1334,49 @@ async def test_ws_get_unread_counts_returns_empty_when_no_tracker(
     assert conn.results[0][1] == {"unread": {}, "last_read": {}}
 
 
-async def test_ws_get_unread_counts_happy(hass: HomeAssistant) -> None:
-    """Both unread counts and last_read map flow through the payload."""
+async def test_ws_get_unread_counts_happy(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """Derived counts + last_read flow through the payload.
+
+    Phase 1 of `Cursor-Derived Unread Count and Mark-Read Gate Fix`
+    (2026-05-08): the ``unread`` map is computed by walking the
+    store's index and asking ``count_unread_after`` for each entity
+    that has a stored conversation. Entries with count > 0 are
+    emitted; count == 0 is omitted.
+    """
     tracker = MagicMock()
-    tracker.get_all_unread = MagicMock(return_value={"binary_sensor.x": 3})
     tracker.get_all_last_read = MagicMock(
         return_value={"binary_sensor.x": "msg_99"}
     )
     hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    store = companion_entry.runtime_data.store
+    store.get_message_index = MagicMock(return_value={"binary_sensor.x": {}})
+    store.count_unread_after = AsyncMock(return_value=3)
+
     conn = _Connection()
     await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
+
+    store.count_unread_after.assert_awaited_once_with(
+        "binary_sensor.x", "msg_99"
+    )
     assert conn.results[0][1] == {
         "unread": {"binary_sensor.x": 3},
         "last_read": {"binary_sensor.x": "msg_99"},
     }
 
 
-async def test_get_unread_counts_includes_last_read(
-    hass: HomeAssistant,
+async def test_ws_get_unread_counts_omits_zero_counts(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
 ) -> None:
-    """Phase 1 Change 4: payload extension is backwards-compatible.
+    """Entities with derived count == 0 are omitted from ``unread``.
 
-    Older clients reading only ``unread`` continue to work; new clients
-    read ``last_read`` to populate per-conversation anchors on connect.
+    Matches the legacy ``get_all_unread()`` behavior (which filtered
+    ``v > 0``) so the panel's badge logic — which treats absence as
+    "no badge" — keeps working unchanged.
     """
     tracker = MagicMock()
-    tracker.get_all_unread = MagicMock(
-        return_value={"binary_sensor.alice": 5, "binary_sensor.bob": 1}
-    )
     tracker.get_all_last_read = MagicMock(
         return_value={
             "binary_sensor.alice": "msg_aaa",
@@ -1369,18 +1384,59 @@ async def test_get_unread_counts_includes_last_read(
         }
     )
     hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    store = companion_entry.runtime_data.store
+    store.get_message_index = MagicMock(
+        return_value={"binary_sensor.alice": {}, "binary_sensor.bob": {}}
+    )
+    # Alice has 5 unread; Bob has 0 (cursor at conversation tail).
+    counts = {"binary_sensor.alice": 5, "binary_sensor.bob": 0}
+    store.count_unread_after = AsyncMock(side_effect=lambda eid, _c: counts[eid])
+
     conn = _Connection()
     await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
+
     payload = conn.results[0][1]
-    assert "unread" in payload
-    assert "last_read" in payload
-    assert payload["unread"] == {
-        "binary_sensor.alice": 5,
-        "binary_sensor.bob": 1,
-    }
+    assert payload["unread"] == {"binary_sensor.alice": 5}
+    # last_read is unfiltered — older clients populate anchors regardless
+    # of badge state.
     assert payload["last_read"] == {
         "binary_sensor.alice": "msg_aaa",
         "binary_sensor.bob": "msg_bbb",
+    }
+
+
+async def test_ws_get_unread_counts_handles_never_read_conversations(
+    hass: HomeAssistant, companion_entry: MockConfigEntry
+) -> None:
+    """An entity with stored messages but no cursor → all-inbound count.
+
+    ``count_unread_after`` is invoked with ``cursor_id=None`` for
+    entities present in the store index but absent from
+    ``get_all_last_read()`` (fresh installs / never-read
+    conversations). Mirrors the legacy in-memory counter's behavior of
+    starting from 0 and incrementing on each inbound — except now the
+    count is durable across HA restart.
+    """
+    tracker = MagicMock()
+    tracker.get_all_last_read = MagicMock(return_value={})
+    hass.data[DOMAIN] = {"unread_tracker": tracker}
+
+    store = companion_entry.runtime_data.store
+    store.get_message_index = MagicMock(
+        return_value={"binary_sensor.fresh": {}}
+    )
+    store.count_unread_after = AsyncMock(return_value=4)
+
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_unread_counts, hass, conn, {"id": 1})
+
+    store.count_unread_after.assert_awaited_once_with(
+        "binary_sensor.fresh", None
+    )
+    assert conn.results[0][1] == {
+        "unread": {"binary_sensor.fresh": 4},
+        "last_read": {},
     }
 
 
@@ -1388,12 +1444,11 @@ async def test_ws_mark_read_happy(hass: HomeAssistant) -> None:
     """No companion store registered → mark_read still resolves cleanly.
 
     Without a config entry on hass, ``_get_store`` returns None and the
-    snapshot path is skipped — the only assertion is that the in-memory
-    count is cleared and success is reported.
+    cursor passed to ``tracker.mark_read`` is None — defensive no-op
+    on the cursor side, but the success reply still fires.
     """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
-    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
     conn = _Connection()
     await _call_ws(
@@ -1402,10 +1457,8 @@ async def test_ws_mark_read_happy(hass: HomeAssistant) -> None:
         conn,
         {"id": 1, "entity_id": "binary_sensor.alice"},
     )
-    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
-    # No store on hass → set_last_read must not fire (defensive: a
-    # snapshot without a backing store would be a fabricated cursor).
-    tracker.set_last_read.assert_not_called()
+    # New single-call API: (entity_id, message_id|None).
+    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice", None)
     assert conn.results[0][1] == {"success": True}
 
 
@@ -1422,15 +1475,16 @@ async def test_ws_mark_read_no_tracker(hass: HomeAssistant) -> None:
 async def test_mark_read_snapshots_cursor(
     hass: HomeAssistant, companion_entry: MockConfigEntry
 ) -> None:
-    """Phase 1 Change 3: ws_mark_read snapshots the newest message id.
+    """ws_mark_read advances the cursor to the newest stored message.
 
-    With a tracker AND a store both registered, mark-read clears the
-    in-memory count AND advances the persistent cursor to the newest
-    message in the conversation (returned by ``get_messages(limit=1)``).
+    With a tracker AND a store both registered, mark-read advances
+    the persistent cursor to the newest message in the conversation
+    (returned by ``get_messages(limit=1)``) — passed in a single
+    ``mark_read(entity_id, message_id)`` call (Phase 1 of `Cursor-
+    Derived Unread Count and Mark-Read Gate Fix`).
     """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
-    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
 
     companion_entry.runtime_data.store.get_messages = AsyncMock(
@@ -1445,8 +1499,7 @@ async def test_mark_read_snapshots_cursor(
         {"id": 1, "entity_id": "binary_sensor.alice"},
     )
 
-    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
-    tracker.set_last_read.assert_awaited_once_with(
+    tracker.mark_read.assert_awaited_once_with(
         "binary_sensor.alice", "msg_newest"
     )
     assert conn.results[0][1] == {"success": True}
@@ -1463,7 +1516,6 @@ async def test_mark_read_snapshot_uses_get_messages(
     """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
-    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
 
     get_messages_mock = AsyncMock(
@@ -1481,7 +1533,7 @@ async def test_mark_read_snapshot_uses_get_messages(
 
     # Exact signature: positional entity_id, kw-only limit=1.
     get_messages_mock.assert_awaited_once_with("binary_sensor.alice", limit=1)
-    tracker.set_last_read.assert_awaited_once_with(
+    tracker.mark_read.assert_awaited_once_with(
         "binary_sensor.alice", "msg_chronologically_newest"
     )
 
@@ -1502,7 +1554,6 @@ async def test_mark_read_with_foreign_entry_id_still_snapshots(
     """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
-    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
 
     companion_entry.runtime_data.store.get_messages = AsyncMock(
@@ -1533,8 +1584,7 @@ async def test_mark_read_with_foreign_entry_id_still_snapshots(
     )
 
     # No crash; cursor still advances against the chat companion store.
-    tracker.mark_read.assert_awaited_once_with("binary_sensor.alice")
-    tracker.set_last_read.assert_awaited_once_with(
+    tracker.mark_read.assert_awaited_once_with(
         "binary_sensor.alice", "msg_42"
     )
     assert conn.results[0][1] == {"success": True}
@@ -1546,13 +1596,13 @@ async def test_mark_read_with_no_messages_no_op(
     """Empty conversation → cursor untouched, success still reported.
 
     Defensive: ``recent`` is an empty list when the conversation has
-    never had a message stored. The snapshot must not fabricate a None
-    cursor or raise — it's a silent no-op on the cursor side, but the
-    in-memory count clear and the success reply still fire.
+    never had a message stored. ``mark_read`` is invoked with
+    ``message_id=None``, which the tracker treats as a defensive
+    no-op on the cursor side (but still fires the cleared-badge
+    event). The success reply still fires.
     """
     tracker = MagicMock()
     tracker.mark_read = AsyncMock()
-    tracker.set_last_read = AsyncMock()
     hass.data[DOMAIN] = {"unread_tracker": tracker}
 
     companion_entry.runtime_data.store.get_messages = AsyncMock(
@@ -1567,8 +1617,7 @@ async def test_mark_read_with_no_messages_no_op(
         {"id": 1, "entity_id": "binary_sensor.empty"},
     )
 
-    tracker.mark_read.assert_awaited_once_with("binary_sensor.empty")
-    tracker.set_last_read.assert_not_called()
+    tracker.mark_read.assert_awaited_once_with("binary_sensor.empty", None)
     assert conn.results[0][1] == {"success": True}
 
 

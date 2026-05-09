@@ -564,7 +564,27 @@ export class MeshCorePanel extends LitElement {
   private _selectDevice(entryId: string) {
     if (entryId !== this._selectedEntryId) {
       this._selectedEntryId = entryId;
-      this._loadDeviceData();
+      // Change 3.1: clear any pending chat target from the previous
+      // entry (e.g., a "Message" action on a node-page contact that
+      // doesn't exist on the new entry). Combined with the entry-
+      // switch branch in chat-page's `updated()` lifecycle, this
+      // lands the user on the empty-state placeholder for the new
+      // entry until they explicitly pick a conversation — avoiding
+      // the lastRead/unreadCounts race that would otherwise auto-
+      // clear the new entry's badge against a stale anchor.
+      // chat-page's `selectedId` is bound to this property, so
+      // clearing here is the canonical way to reset selection state
+      // (mutating `selectedId` from inside chat-page would be
+      // re-asserted by Lit prop binding on the next render pass).
+      this._pendingChatTarget = null;
+      // F01 fix: the backend filters unread counts by entry_id (Phase 4
+      // ws_get_unread_counts), so stale counts from the previously-
+      // selected entry remain in `_unreadCounts` until the next
+      // `meshcore_unread_updated` bus event fires — could be minutes on
+      // a quiet mesh. Run the unread refresh in parallel with the
+      // contacts/channels refresh; both are independent backend round-
+      // trips against the new entry.
+      Promise.all([this._loadDeviceData(), this._loadUnreadCounts()]);
     }
     this._closeDeviceDropdown();
   }

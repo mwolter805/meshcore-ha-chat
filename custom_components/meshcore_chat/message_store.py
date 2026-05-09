@@ -429,6 +429,48 @@ class MessageStore:
             True,
         )
 
+    async def count_unread_after(
+        self, entity_id: str, cursor_id: str | None
+    ) -> int:
+        """Count inbound messages chronologically newer than ``cursor_id``.
+
+        Used by the cursor-derived unread-badge path (proposal `Cursor-
+        Derived Unread Count and Mark-Read Gate Fix`, Phase 1). Replaces
+        the in-memory ``UnreadTracker._unread`` counter — derives the
+        unread count on demand from the persistent cursor + the
+        chronologically-sorted store, eliminating the desync class
+        where the in-memory counter reset on HA restart while the
+        persistent cursor survived.
+
+        ``cursor_id=None`` (fresh-install or never-read conversation)
+        returns the count of all inbound messages — which on a fresh
+        install is the same as the legacy in-memory counter would have
+        produced (zero, since no messages have been stored yet).
+
+        Cursor-not-found path (pruning, manual storage deletion, archive
+        feature): returns the count of all inbound messages, matching
+        the divider's "no anchor → fall back to count-based" branch in
+        ``_renderItemsWithDivider``. Both surfaces stay consistent.
+
+        Outgoing messages do not count — same semantics as the legacy
+        ``_unread`` counter, which only incremented on
+        ``not record["outgoing"]`` in the message handler.
+        """
+        messages = await self._ensure_loaded(entity_id)
+        if cursor_id is None:
+            return sum(1 for m in messages if not m.get("outgoing", False))
+        idx = next(
+            (i for i, m in enumerate(messages) if m.get("id") == cursor_id),
+            None,
+        )
+        if idx is None:
+            # Cursor pruned/orphaned — same fallback as the divider's
+            # anchor-not-found path.
+            return sum(1 for m in messages if not m.get("outgoing", False))
+        return sum(
+            1 for m in messages[idx + 1:] if not m.get("outgoing", False)
+        )
+
     def get_message_index(self) -> dict[str, dict]:
         """Return the lightweight message index (always in memory)."""
         return self._message_index

@@ -132,6 +132,17 @@ interface PrivateChatPage {
   _currentEntityId: string | null;
   _markReadGraceUntil: number;
   _postSwitchMarkReadTimer: ReturnType<typeof setTimeout> | null;
+  /** Change 3.2 — set inside `_markActiveRead`, reset in
+      `_onConversationSelected` and the entry-id-changed branch of
+      `updated()`. Tests in the R9 lifecycle suite read/write this
+      field directly. */
+  _markReadFiredForEntity: string | null;
+  _conversationResolved: boolean;
+  _anchorIdAtSelection: string | null;
+  _pendingScroll: 'bottom' | 'last-read' | null;
+  _scrollInFlight: boolean;
+  _markActiveRead(entityId: string | null): void;
+  _onConversationSelected(): void;
   _onChatScroll(e: Event): void;
   _checkAndMarkReadIfAtBottom(): void;
   _isLastMessageVisible(): boolean;
@@ -153,6 +164,19 @@ function priv(page: ChatPage): PrivateChatPage {
  */
 function stubLastMessageVisible(page: ChatPage, value: boolean): void {
   priv(page)._isLastMessageVisible = () => value;
+}
+
+/**
+ * Clear the conversation-switch scroll-into-place state so pill-
+ * visibility assertions reflect the post-settled state (viewport at
+ * its intended position) rather than the brief in-flight window where
+ * the pill is intentionally suppressed. The async test store-fetch
+ * may leave `_pendingScroll` non-null at assertion time; this helper
+ * pins both signals off.
+ */
+function clearScrollSettlingState(page: ChatPage): void {
+  priv(page)._pendingScroll = null;
+  priv(page)._scrollInFlight = false;
 }
 
 let containers: HTMLElement[] = [];
@@ -346,6 +370,9 @@ describe('Phase 4 — mark-read 1000ms grace period after switch', () => {
     expect(markConversationRead).not.toHaveBeenCalled();
 
     // Past the grace window: same call DOES fire mark-read.
+    // (Phase 2 / Change 2.1: the user-engagement scroll gate was
+    // removed; the grace-period gate is the only one left for this
+    // case.)
     priv(page)._markReadGraceUntil = 0;
     priv(page)._checkAndMarkReadIfAtBottom();
     expect(markConversationRead).toHaveBeenCalledTimes(1);
@@ -487,6 +514,171 @@ describe('Phase 4 — _jumpToBottom loads any unloaded newer messages and scroll
   });
 });
 
+// R9 (Phase 2 / Change 3.2). The `_markReadFiredForEntity` field
+// replaces the previous draft's misuse of `_postSwitchMarkReadTimer`
+// as a "mark_read has not fired" signal. Pin its lifecycle so a
+// future refactor can't silently bypass `_markActiveRead` and break
+// the late-arriving-`lastRead` block's correctness.
+describe('Phase 2 / R9 — _markReadFiredForEntity lifecycle', () => {
+  it('starts null', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    expect(priv(page)._markReadFiredForEntity).toBeNull();
+  });
+
+  it('_markActiveRead(entityId) sets the flag to that entity', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const entityId = priv(page)._currentEntityId;
+    expect(entityId).not.toBeNull();
+    expect(priv(page)._markReadFiredForEntity).toBeNull();
+
+    priv(page)._markActiveRead(entityId);
+    expect(priv(page)._markReadFiredForEntity).toBe(entityId);
+  });
+
+  it('_markActiveRead(null) is a no-op (does NOT set the flag)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    priv(page)._markReadFiredForEntity = 'preexisting';
+    priv(page)._markActiveRead(null);
+    // Pre-existing value preserved: the early-return path inside
+    // `_markActiveRead` short-circuits before the assignment, which
+    // is fine because there's no entity context for the flag to
+    // pertain to.
+    expect(priv(page)._markReadFiredForEntity).toBe('preexisting');
+  });
+
+  it('conversation switch resets the flag', async () => {
+    const page = await mountChatPage({
+      conversations: [makeChannel(0), makeChannel(1)],
+    });
+    page.selectedId = '0';
+    await page.updateComplete;
+    priv(page)._markActiveRead(priv(page)._currentEntityId);
+    expect(priv(page)._markReadFiredForEntity).not.toBeNull();
+
+    // Flip to the other conversation — `_onConversationSelected`
+    // resets the flag.
+    page.selectedId = '1';
+    await page.updateComplete;
+    expect(priv(page)._markReadFiredForEntity).toBeNull();
+  });
+
+  it('entry switch resets the flag and auto-clears selectedId on the child', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    priv(page)._markActiveRead(priv(page)._currentEntityId);
+    expect(priv(page)._markReadFiredForEntity).not.toBeNull();
+    expect(priv(page)._conversationResolved).toBe(true);
+
+    // Real-world repro: the parent panel writes
+    // `this._pendingChatTarget = null` in `_selectDevice`, but
+    // `_pendingChatTarget` is normally already null (conversation-
+    // list clicks set `chat-page.selectedId` directly without
+    // writing back to the parent). Lit's `.prop=` binding elides
+    // null→null assignments, so the child's `selectedId` stays
+    // stuck at the previous value unless the entry-id-changed
+    // branch in `updated()` clears it explicitly. This test pins
+    // that contract — only `config` is mutated here; if the child
+    // doesn't self-clear, `selectedId` stays at '0' and
+    // `_renderChatArea` falls into the "Conversation unavailable"
+    // branch (a stale-selection regression observed during Phase 2
+    // post-deploy testing).
+    page.config = makeConfig({ entry_id: 'other-entry' });
+    await page.updateComplete;
+    expect(priv(page)._markReadFiredForEntity).toBeNull();
+    expect(page.selectedId).toBeNull();
+    expect(priv(page)._currentEntityId).toBeNull();
+    expect(priv(page)._conversationResolved).toBe(false);
+  });
+
+  it('chat-page never auto-selects: empty-state on initial mount, after entry switch, and after channels-updated re-fire', async () => {
+    // Phase 2 / Change 3.1 extension: the auto-select-first-
+    // conversation branch was removed entirely. Every entry into
+    // the chat tab lands on the empty-state placeholder. This test
+    // pins all three code paths that historically fired auto-select:
+    //   (1) initial mount with conversations populated,
+    //   (2) entry switch (config.entry_id transitions),
+    //   (3) parent re-firing `_loadDeviceData` after a subscribed
+    //       `meshcore_channels_updated` event (config new ref, same
+    //       entry_id, conversations new ref).
+    // After Phase 2 none of these fire `selectedId`.
+
+    // Path 1: initial mount with conversations populated, no
+    // selection. Pre-Phase-2-extension this would auto-select '0'.
+    const page = await mountChatPage({
+      conversations: [makeChannel(0), makeChannel(1)],
+    });
+    expect(page.selectedId).toBeNull();
+    expect(priv(page)._currentEntityId).toBeNull();
+
+    // Manual selection still works.
+    page.selectedId = '0';
+    await page.updateComplete;
+    expect(priv(page)._conversationResolved).toBe(true);
+
+    // Path 2: entry switch.
+    page.config = makeConfig({ entry_id: 'other-entry' });
+    await page.updateComplete;
+    expect(page.selectedId).toBeNull();
+
+    // Path 3: subscribed event re-fires `_loadDeviceData` →
+    // `_config` re-spreads with SAME entry_id; conversations
+    // rebuilds. Without the auto-select branch, no automatic
+    // selection happens regardless.
+    page.config = makeConfig({ entry_id: 'other-entry' });
+    page.conversations = [makeChannel(0), makeChannel(1)];
+    await page.updateComplete;
+    expect(page.selectedId).toBeNull();
+    expect(priv(page)._currentEntityId).toBeNull();
+  });
+
+  it('late-arriving lastRead re-anchors when the flag is null', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const entityId = priv(page)._currentEntityId!;
+    // Simulate the fresh-panel-load race: the user picked the
+    // conversation before lastRead arrived, so the anchor was
+    // captured as null and pendingScroll fell through to 'bottom'
+    // (which the executor already consumed during the initial
+    // updated() pass). Force the post-initial-render conditions the
+    // re-anchor block expects.
+    priv(page)._anchorIdAtSelection = null;
+    priv(page)._pendingScroll = null;
+    priv(page)._conversationResolved = true;
+    priv(page)._markReadFiredForEntity = null;
+
+    // lastRead arrives.
+    page.lastRead = { [entityId]: 'msg-anchor-id' };
+    await page.updateComplete;
+
+    expect(priv(page)._anchorIdAtSelection).toBe('msg-anchor-id');
+  });
+
+  it('late-arriving lastRead does NOT re-anchor when mark_read already fired for this entity', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const entityId = priv(page)._currentEntityId!;
+    // Simulate: user opened the conversation, mark_read fired
+    // (scroll-driven or otherwise — see _markActiveRead set-site).
+    priv(page)._anchorIdAtSelection = null;
+    priv(page)._pendingScroll = null;
+    priv(page)._conversationResolved = true;
+    priv(page)._markReadFiredForEntity = entityId; // <-- fired
+
+    // lastRead arrives — but it now reflects the conversation tail
+    // (mark_read advanced it). Re-anchoring here would suppress the
+    // divider entirely. The block must decline.
+    page.lastRead = { [entityId]: 'msg-tail-id' };
+    await page.updateComplete;
+
+    expect(priv(page)._anchorIdAtSelection).toBeNull();
+  });
+});
+
 describe('Phase 4 — indicator visibility', () => {
   function indicatorVisible(page: ChatPage): boolean {
     return !!page.shadowRoot?.querySelector('.new-messages-indicator');
@@ -508,6 +700,7 @@ describe('Phase 4 — indicator visibility', () => {
     const store = priv(page)._messageStore;
     if (!store) throw new Error('expected store');
     (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 4;
+    clearScrollSettlingState(page);
     page.requestUpdate();
     await page.updateComplete;
     expect(indicatorVisible(page)).toBe(true);
@@ -523,8 +716,285 @@ describe('Phase 4 — indicator visibility', () => {
     const store = priv(page)._messageStore;
     if (!store) throw new Error('expected store');
     (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = true;
+    clearScrollSettlingState(page);
     page.requestUpdate();
     await page.updateComplete;
     expect(indicatorVisible(page)).toBe(true);
+  });
+
+  // Phase 2 follow-up regression: pre-fix, the pill flashed for a
+  // split-second on anchor-open then disappeared because the
+  // pill-visibility helper flipped false the moment the anchor-scroll
+  // landed the divider at the viewport top. The corrected
+  // `_hasContentBelowViewport` semantic stays true while the latest
+  // message is below the viewport, regardless of where the divider
+  // is. Stub-based test: drive the helper return value directly
+  // (happy-dom doesn't reliably compute getBoundingClientRect for the
+  // chat container's scroll math).
+  it('visible when last bubble is below viewport (anchor-open with all unread in after-window)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Stub the helper to return true (mimics: divider rendered AND
+    // last bubble below viewport).
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    clearScrollSettlingState(page);
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(true);
+    const text =
+      page.shadowRoot?.querySelector('.new-messages-indicator')?.textContent ?? '';
+    expect(text).toContain('unread');
+  });
+
+  it('hidden when last bubble IS visible (user has reached conversation tail)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Stub the helper to return false (mimics: divider rendered but
+    // last bubble at or within viewport).
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => false;
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(false);
+  });
+
+  // Phase 2 follow-up: label is "↓ latest" (not "↓ unread") when the
+  // user has read everything currently known but is scrolled up. The
+  // divider is preserved through the visit (anchor captured once, per
+  // the proposal), so after mark_read advances the cursor and the
+  // user scrolls back up the divider is still rendered and the last
+  // bubble is below the viewport — but nothing is actually unread.
+  // Avoids the misleading "↓ unread" label in this state.
+  it('label is "↓ latest" when cursor is at the conversation tail (read everything, scrolled up)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    const entityId = priv(page)._currentEntityId!;
+    expect(entityId).not.toBeNull();
+    // Inject a single non-temp message and pin lastRead to its id —
+    // mimics: cursor at conversation tail (latest visible), no
+    // unloaded newer.
+    (store as unknown as { _messages: ChatMessage[] })._messages = [
+      {
+        id: 'msg-tail-id',
+        sender: 'someone',
+        text: 'hello',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: hello',
+        mentions: [],
+      },
+    ];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    page.lastRead = { [entityId]: 'msg-tail-id' };
+    // Stub the unread-below-viewport check to true (user is scrolled
+    // up; the divider is still rendered above the viewport, last
+    // bubble below).
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    clearScrollSettlingState(page);
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(true);
+    const text =
+      page.shadowRoot?.querySelector('.new-messages-indicator')?.textContent ?? '';
+    expect(text).toContain('latest');
+    expect(text).not.toContain('unread');
+  });
+
+  // No-unread-ever case: conversation has never had unread on this
+  // visit (no divider rendered), but the user has scrolled up so the
+  // latest message is off-screen. Pill should appear with label
+  // "↓ latest" — a pure jump-to-current affordance. Earlier iterations
+  // gated this on the divider element existing, which excluded this
+  // case.
+  it('label is "↓ latest" when no divider exists but the last bubble is below viewport', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    const entityId = priv(page)._currentEntityId!;
+    (store as unknown as { _messages: ChatMessage[] })._messages = [
+      {
+        id: 'msg-only',
+        sender: 'someone',
+        text: 'hi',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: hi',
+        mentions: [],
+      },
+    ];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Cursor is at the buffer tail (conversation has been fully read
+    // — possibly never had unread on this visit, so no divider was
+    // rendered).
+    page.lastRead = { [entityId]: 'msg-only' };
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    clearScrollSettlingState(page);
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(true);
+    const text =
+      page.shadowRoot?.querySelector('.new-messages-indicator')?.textContent ?? '';
+    expect(text).toContain('latest');
+  });
+
+  // Phase 2 follow-up: suppress the pill during the conversation-
+  // switch scroll-into-place window. Between buffer-populated and
+  // the rAF-scheduled scroll executing, `scrollTop=0` makes the
+  // last bubble appear below viewport — without this gate the pill
+  // briefly flashes "↓ latest" or "↓ unread" for one or two frames
+  // before the scroll lands. Two signals are checked: `_pendingScroll`
+  // (a scroll mode is queued in `_onConversationSelected`) and
+  // `_scrollInFlight` (`_executeScroll` is in the middle of its
+  // rAF chain). Either means the viewport hasn't settled.
+  it('hidden when _pendingScroll is set (queued scroll-to-bottom on conversation switch)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    (store as unknown as { _messages: ChatMessage[] })._messages = [
+      {
+        id: 'msg-1',
+        sender: 'someone',
+        text: 'hi',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: hi',
+        mentions: [],
+      },
+    ];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Stub the visibility gate to true (last bubble below viewport,
+    // pre-scroll state) — without the pendingScroll guard this would
+    // make the pill render.
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    // Pre-scroll: queued mode set, scroll not yet in flight.
+    priv(page)._pendingScroll = 'bottom';
+    priv(page)._scrollInFlight = false;
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(false);
+  });
+
+  it('hidden when _scrollInFlight is true (executor running, viewport not yet at target)', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    (store as unknown as { _messages: ChatMessage[] })._messages = [
+      {
+        id: 'msg-1',
+        sender: 'someone',
+        text: 'hi',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: hi',
+        mentions: [],
+      },
+    ];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    // Mid-scroll: pendingScroll cleared, scroll executor still running.
+    priv(page)._pendingScroll = null;
+    priv(page)._scrollInFlight = true;
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(false);
+  });
+
+  // Empty buffer guard: even if some other gate would suggest pill
+  // visibility, an empty buffer has nothing to scroll TO, so the pill
+  // must hide.
+  it('hidden when buffer is empty even with last-bubble-not-visible', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    (store as unknown as { _messages: ChatMessage[] })._messages = [];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Don't stub _hasContentBelowViewport — let it run normally with
+    // an empty buffer; it should return false on its own.
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(false);
+  });
+
+  // Companion to the test above: when the cursor is NOT at the
+  // conversation tail (lastRead < buffer's last id), label stays
+  // "↓ unread".
+  it('label is "↓ unread" when buffer has unread past the cursor', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    const entityId = priv(page)._currentEntityId!;
+    (store as unknown as { _messages: ChatMessage[] })._messages = [
+      {
+        id: 'msg-older',
+        sender: 'someone',
+        text: 'older',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: older',
+        mentions: [],
+      },
+      {
+        id: 'msg-newer',
+        sender: 'someone',
+        text: 'newer',
+        timestamp: new Date(),
+        isOutgoing: false,
+        isSystem: false,
+        raw: 'someone: newer',
+        mentions: [],
+      },
+    ];
+    (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
+    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
+    // Cursor at older message → newer is unread.
+    page.lastRead = { [entityId]: 'msg-older' };
+    (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
+      () => true;
+    clearScrollSettlingState(page);
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(indicatorVisible(page)).toBe(true);
+    const text =
+      page.shadowRoot?.querySelector('.new-messages-indicator')?.textContent ?? '';
+    expect(text).toContain('unread');
+    expect(text).not.toContain('latest');
   });
 });

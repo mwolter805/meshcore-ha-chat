@@ -83,6 +83,44 @@ export class ChatPage extends LitElement {
    */
   private _postSwitchMarkReadTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Tracks the entity_id for which mark_read has fired during the
+   * current selection. Used by the late-arriving-`lastRead` block in
+   * `updated()` (Change 3.2) to refuse re-anchoring after the cursor
+   * has already advanced — once mark_read has fired,
+   * `lastRead[entity]` reflects the conversation tail and re-anchoring
+   * against it would suppress the unread divider entirely.
+   *
+   * NOTE: `_postSwitchMarkReadTimer !== null` is NOT a sufficient
+   * proxy for "mark_read has not yet fired". The timer is nulled when
+   * its setTimeout callback fires, but mark_read can also fire from
+   * `_onChatScroll` and `_scrollToBottomIfNearEnd` without touching
+   * the timer. This dedicated flag is the authoritative signal.
+   *
+   * Set in `_markActiveRead`. Reset to null on conversation switch
+   * (in `_onConversationSelected`) and on entry switch (in `updated()`'s
+   * entry-id-changed branch).
+   */
+  private _markReadFiredForEntity: string | null = null;
+
+  /**
+   * Phase 2 follow-up: idempotency guard for the chatty
+   * `_checkAndMarkReadIfAtBottom` path. The proposal noted the
+   * backend's `mark_read` is "safe to call frequently" (idempotent),
+   * but in practice a single scroll-to-bottom fires ~12 scroll events
+   * — each sending a redundant WS round-trip. Guard tracks the
+   * non-temporary buffer-tail message id we last asked the backend
+   * to mark-read against; subsequent calls with an unchanged buffer
+   * tail are skipped. Realtime arrivals naturally re-arm the gate
+   * (buffer tail id changes when a new stored message arrives).
+   *
+   * Reset on conversation switch (in `_onConversationSelected`) and
+   * entry switch (in `updated()`'s entry-id-changed branch) so a
+   * re-open of the same conversation can fire mark_read once for the
+   * fresh anchor capture.
+   */
+  private _lastMarkReadIdSent: string | null = null;
+
   static styles = css`
     :host {
       display: flex;
@@ -402,8 +440,13 @@ export class ChatPage extends LitElement {
     .new-messages-indicator {
       position: sticky;
       bottom: 12px;
-      align-self: center;
-      margin: 0 auto;
+      /* F05 fix: 'align-self: center' requires a flex parent (chat-
+         container is 'display: block'); 'margin: 0 auto' requires a
+         block-level element with finite width (button defaults to
+         'inline-block'). Both were no-ops. Using left + transform
+         works with sticky positioning regardless of parent layout. */
+      left: 50%;
+      transform: translateX(-50%);
       padding: 6px 14px;
       border: none;
       border-radius: 16px;
@@ -422,7 +465,10 @@ export class ChatPage extends LitElement {
     }
 
     .new-messages-indicator:active {
-      transform: translateY(1px);
+      /* F05 fix: combine the centering transform with the press
+         offset. A single 'transform' declaration replaces any prior
+         one, so ':active' must restate both. */
+      transform: translateX(-50%) translateY(1px);
     }
   `;
 
@@ -470,34 +516,99 @@ export class ChatPage extends LitElement {
     }
     if (changedProperties.has('config') && this.config && this._messageStore) {
       this._messageStore.setConfig(this.config);
-      // Phase 4.6: when the panel-header entry switch lands a new
-      // config here (entry_id changed), re-resolve _currentEntityId
-      // by re-running _onConversationSelected() — otherwise selectedId
-      // stays the same and the chat view keeps displaying the previous
-      // entry's _ch_<idx>_messages (or _<pubkey6>_messages for DMs).
-      // Only fire when entry_id specifically changed; avoids spurious
-      // re-fetches when other config props tick (e.g., node_name
-      // updates after identity rename).
+      // Change 3.1: when the panel-header entry switch lands a new
+      // config here (entry_id changed), reset chat-page's derived
+      // selection state so the user lands on the empty-state
+      // placeholder for the new entry until they explicitly pick a
+      // conversation.
+      //
+      // We must clear `this.selectedId = null` from the child here.
+      // The parent (`meshcore-chat-panel.ts:_selectDevice`) clears
+      // `_pendingChatTarget = null` simultaneously, but
+      // `_pendingChatTarget` is normally already null — conversation-
+      // list clicks set `chat-page.selectedId` directly without
+      // writing back to the parent — and Lit's `.prop=` binding
+      // elides null→null assignments (`===` check on the rendered
+      // value). So a parent-side `_pendingChatTarget = null → null`
+      // does NOT trigger the child's `selectedId` setter, leaving
+      // the stale id (e.g., "0") in place against the new entry's
+      // unresolved state. Result: `_renderChatArea` renders
+      // "Conversation unavailable" instead of "Select a
+      // conversation to start", and re-clicking the same id is a
+      // no-op because `selectedId` didn't change. Clearing here is
+      // safe because the parent's null is already in place — the
+      // next parent re-render also re-binds null→null and is the
+      // same no-op, so there's no bounce-back.
       const previousConfig = changedProperties.get('config') as PanelConfig | undefined;
-      if (
-        this.selectedId
-        && previousConfig
-        && previousConfig.entry_id !== this.config.entry_id
-      ) {
-        this._onConversationSelected();
+      if (previousConfig && previousConfig.entry_id !== this.config.entry_id) {
+        this.selectedId = null;
+        this._currentEntityId = null;
+        this._conversationResolved = false;
+        this._anchorIdAtSelection = null;
+        this._unreadCountAtSelection = 0;
+        this._pendingScroll = null;
+        this._lastMessageCount = 0;
+        this._markReadFiredForEntity = null;
+        this._lastMarkReadIdSent = null;
+        if (this._postSwitchMarkReadTimer) {
+          clearTimeout(this._postSwitchMarkReadTimer);
+          this._postSwitchMarkReadTimer = null;
+        }
+        this._messageStore.switchEntity(null);
+        this.dispatchEvent(new CustomEvent('active-entity-changed', {
+          detail: { entityId: null },
+          bubbles: true,
+          composed: true,
+        }));
       }
     }
     if (changedProperties.has('selectedId')) {
       this._onConversationSelected();
     }
-    // Auto-select first conversation in wide mode when conversations arrive
-    if (changedProperties.has('conversations') && !this.selectedId && !this._isNarrow && this.conversations.length > 0) {
-      const first = this.conversations[0];
-      const isContact = 'pubkey_prefix' in first;
-      this.selectedId = isContact
-        ? (first as Contact).pubkey_prefix
-        : String((first as Channel).channel_idx);
+    // Change 3.2: late-arriving `lastRead`. Handles the fresh-panel-
+    // load / entry-switch-immediate-click race where the user picks
+    // a conversation before `_loadUnreadCounts` has resolved. At
+    // click time `_onConversationSelected` ran with an empty (or
+    // stale entry's) `lastRead` map, so `_anchorIdAtSelection` was
+    // captured as null and `_pendingScroll` fell through to 'bottom'.
+    // When the data finally arrives, retroactively capture the anchor
+    // and re-execute the scroll iff:
+    //
+    //   - a conversation is currently selected and resolved,
+    //   - the anchor was not captured at selection time,
+    //   - `lastRead[entity]` is now defined,
+    //   - mark_read has NOT yet fired for this entity in the current
+    //     selection (`_markReadFiredForEntity` is the authoritative
+    //     signal — `_postSwitchMarkReadTimer` can stay non-null after
+    //     scroll-driven mark_read has fired),
+    //   - no `_pendingScroll` is queued (avoids racing with the
+    //     legitimate first-render scroll).
+    //
+    // The pending-scroll executor below picks this up on this same
+    // render pass.
+    if (
+      changedProperties.has('lastRead')
+      && this._currentEntityId
+      && this._conversationResolved
+      && this._anchorIdAtSelection === null
+      && this.lastRead?.[this._currentEntityId]
+      && this._markReadFiredForEntity !== this._currentEntityId
+      && this._pendingScroll === null
+    ) {
+      this._anchorIdAtSelection = this.lastRead[this._currentEntityId];
+      this._pendingScroll = 'last-read';
     }
+    // Phase 2 / Change 3.1 extension: the auto-select-first-
+    // conversation branch was removed entirely. Every entry-point
+    // into the chat tab — initial panel mount, switching from another
+    // tab back to chat (chat-page is unmounted/remounted on tab
+    // switch, so each visit starts fresh), and entry switches via
+    // the device dropdown — lands on the "Select a conversation to
+    // start" empty-state placeholder. The user explicitly picks
+    // from the conversation list. Removing the auto-select makes
+    // entry-point behavior uniform and eliminates the entire class
+    // of races where lastRead/unreadCounts may not yet be loaded
+    // when an automatic selection happens.
 
     // Handle pending scroll after render — wait until the store finishes loading
     // so we scroll against a fully-rendered message list, not an empty container.
@@ -835,8 +946,70 @@ export class ChatPage extends LitElement {
     if (!store) return html``;
     const counter = store.newMessagesWhileAway;
     const hasNewer = store.hasNewerMessages;
-    if (counter === 0 && !hasNewer) return html``;
-    const label = counter > 0 ? `↓ ${counter} new` : `↓ new`;
+    // Suppress the pill during a conversation-switch scroll-into-
+    // place. Between buffer-populated and the queued scroll
+    // executing, the chat container's `scrollTop` is at 0 (default
+    // after re-render) so the last bubble appears below the
+    // viewport — `_hasContentBelowViewport()` would return true and
+    // the pill would briefly flash "↓ latest" (or "↓ unread") for
+    // ~16-32 ms before the rAF-scheduled scroll lands. Two signals
+    // identify this settling window:
+    //   - `_pendingScroll !== null` — a scroll mode has been queued
+    //     in `_onConversationSelected` and the executor in
+    //     `updated()` will run it on the next pass once the buffer
+    //     is loaded.
+    //   - `_scrollInFlight === true` — `_executeScroll` has fired
+    //     and `_doScrollWithRetry` is awaiting its updateComplete /
+    //     rAF chain.
+    // Either condition means viewport is not yet in its intended
+    // position; the pill should hide until it settles.
+    if (this._pendingScroll !== null || this._scrollInFlight) return html``;
+    // Show the pill whenever any of three conditions hold:
+    //   - realtime arrival accumulated while user was away from bottom
+    //     (`counter > 0`),
+    //   - unloaded newer messages exist on disk past the buffer tail
+    //     (`hasNewer`),
+    //   - the buffer is non-empty AND the last bubble is below the
+    //     viewport (`hasContentBelow`) — the user does not currently
+    //     see the latest message, so a "jump to current" affordance is
+    //     useful. Whether that off-screen content is unread or already
+    //     read is decided by the label logic below; the pill itself
+    //     just provides the jump.
+    const hasContentBelow = this._hasContentBelowViewport();
+    if (counter === 0 && !hasNewer && !hasContentBelow) return html``;
+    // Label semantics:
+    //   "↓ N new" — N realtime arrivals accumulated while the user was
+    //               not at bottom (most precise; user knows exactly how
+    //               many are waiting).
+    //   "↓ unread" — there is actual unread content below the user's
+    //                viewport: either unloaded newer messages on disk
+    //                (`hasNewer`) OR within-buffer bubbles past the
+    //                viewport that the cursor hasn't yet advanced past.
+    //   "↓ latest" — the user has read everything currently known
+    //                (cursor at conversation tail) but has scrolled up,
+    //                so the pill is just a "jump to current" affordance.
+    //                Avoids the misleading "↓ unread" label after
+    //                mark_read fires.
+    //
+    // Cursor-at-conversation-tail check: `!hasNewer` ensures the buffer
+    // tail IS the conversation's newest (no unloaded content past it),
+    // and `lastRead[entityId] === latestNonTempId()` confirms the
+    // backend cursor matches the buffer tail. The latter uses the
+    // parent-bound `lastRead` map, which `_onUnreadCleared` refreshes
+    // after every mark_read round-trip.
+    let label: string;
+    if (counter > 0) {
+      label = `↓ ${counter} new`;
+    } else {
+      const entityId = this._currentEntityId;
+      const tailId = this._latestNonTempMessageId();
+      const cursorAtTail =
+        !hasNewer
+        && entityId !== null
+        && tailId !== null
+        && this.lastRead?.[entityId] === tailId;
+      label = cursorAtTail ? `↓ latest` : `↓ unread`;
+    }
     return html`
       <button class="new-messages-indicator" @click=${this._jumpToBottom}>
         ${label}
@@ -915,6 +1088,14 @@ export class ChatPage extends LitElement {
       // MARK_READ_GRACE_PERIOD_MS. Subsequent mark-reads in this
       // conversation fire without delay.
       this._markReadGraceUntil = Date.now() + MARK_READ_GRACE_PERIOD_MS;
+      // Reset the mark-read-fired flag for the new selection. After
+      // this runs the late-arriving-lastRead block in `updated()`
+      // (Change 3.2) can safely re-anchor on the pre-mark-read cursor
+      // for the new conversation.
+      this._markReadFiredForEntity = null;
+      // Reset the dedup guard so the first scroll-to-bottom in the
+      // new conversation can fire mark_read once.
+      this._lastMarkReadIdSent = null;
 
       // Phase 4 fix (Bug #1): the divider's scroll-into-view fires its
       // scroll event INSIDE the grace window — the synchronous
@@ -1001,11 +1182,42 @@ export class ChatPage extends LitElement {
   private _markActiveRead(entityId: string | null): void {
     if (!entityId || !this.hass) return;
     markConversationRead(this.hass, entityId, this.config?.entry_id).catch(() => {});
+    // Phase 2 follow-up: record the tail id we asked the backend to
+    // mark-read against, so the dedup guard inside
+    // `_checkAndMarkReadIfAtBottom` skips redundant calls until the
+    // buffer tail changes.
+    this._lastMarkReadIdSent = this._latestNonTempMessageId();
+    // Change 3.2: pin the entity that mark_read has fired against in
+    // the current selection so the late-arriving-`lastRead` block in
+    // `updated()` refuses to re-anchor against an advanced cursor.
+    // Reset on conversation switch (in `_onConversationSelected`) and
+    // on entry switch (in `updated()`'s entry-id-changed branch).
+    this._markReadFiredForEntity = entityId;
     this.dispatchEvent(new CustomEvent('unread-cleared', {
       detail: { entityId },
       bubbles: true,
       composed: true,
     }));
+  }
+
+  /**
+   * Newest non-temporary buffer message id, or null if the buffer is
+   * empty / contains only rt_/optimistic entries. Mirrors the cursor
+   * the backend's `mark_read` would advance to: the backend's
+   * `ws_mark_read` calls `store.get_messages(entity_id, limit=1)`
+   * which returns the chronologically-newest STORED message — `rt_*`
+   * and `optimistic_*` placeholders never reach the store. Used by
+   * the mark-read dedup guard in `_checkAndMarkReadIfAtBottom`.
+   */
+  private _latestNonTempMessageId(): string | null {
+    const messages = this._messageStore?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = messages[i].id;
+      if (!id.startsWith('rt_') && !id.startsWith('optimistic_')) {
+        return id;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1252,6 +1464,37 @@ export class ChatPage extends LitElement {
   }
 
   /**
+   * The pill should show whenever the chronologically-newest message
+   * is below the viewport, regardless of whether the conversation has
+   * ever had unread on this visit. The label
+   * (`_renderNewMessagesIndicator`) decides whether that off-screen
+   * content is "↓ N new" (realtime arrivals while away), "↓ unread"
+   * (actual unread past the cursor), or "↓ latest" (read everything
+   * but scrolled up).
+   *
+   * Returns true when:
+   *   - the buffer is non-empty (there is content to scroll TO), AND
+   *   - the buffer's last bubble is below the viewport bottom (the
+   *     user does not currently see the latest message).
+   *
+   * Returns false when the buffer is empty (nothing to indicate) or
+   * the last bubble is within the viewport (user is at or near the
+   * conversation tail — no jump-to-current affordance needed).
+   *
+   * Earlier iterations gated this on the unread-divider element
+   * existing. That excluded the case where a conversation has never
+   * had unread on this visit (no divider rendered) but the user has
+   * scrolled up and would benefit from a visible "↓ latest" pill.
+   */
+  private _hasContentBelowViewport(): boolean {
+    const container = this._getChatContainer();
+    if (!container) return false;
+    const messageCount = this._messageStore?.messages.length ?? 0;
+    if (messageCount === 0) return false;
+    return !this._isLastMessageVisible();
+  }
+
+  /**
    * Phase 4 (Change 8d): viewport-based mark-read trigger.
    *
    * Idempotent — the backend's `mark_read` is cheap and
@@ -1283,6 +1526,32 @@ export class ChatPage extends LitElement {
     // inside the helper.
     if (this._messageStore?.hasNewerMessages) return;
     if (!this._isLastMessageVisible()) return;
+    // Phase 2 follow-up: client-side dedup. Skip if we've already
+    // asked the backend to mark-read against the current buffer
+    // tail. `_jumpToBottom` and `_onChatScroll` both call this
+    // helper; a single scroll-to-bottom emits ~12 scroll events, so
+    // without this gate every viewport-position-near-bottom would
+    // fire a redundant WS round-trip. The id check is against the
+    // newest non-temporary buffer entry (matching what the backend
+    // sees as the conversation tail at this moment). Realtime
+    // arrivals append a new id and re-arm the gate naturally.
+    const tailId = this._latestNonTempMessageId();
+    if (tailId !== null && tailId === this._lastMarkReadIdSent) return;
+    // The 1 s grace period (MARK_READ_GRACE_PERIOD_MS) serves as
+    // dwell time — long enough that mistaken-clicks don't auto-mark-
+    // read while the user is actively flipping conversations, short
+    // enough that opening a low-unread conversation with everything
+    // in view clears the badge after a brief pause. Earlier code also
+    // gated on a `_userHasScrolledSinceSwitch` flag, but that was
+    // over-protective: low-unread / short conversations have nothing
+    // to scroll past, so the gate blocked the legitimate path. With
+    // it removed, the deferred mark-read timer can fire on switch-
+    // away even if the user never scrolled — which is the desired
+    // behavior when the entire unread band fits in the viewport.
+    // Cursor-derived counts (Phase 1 of this proposal) make the
+    // badge self-heal across HA restart, so an over-eager mark-read
+    // here is at worst a missed visual landmark on next open
+    // (R5 in the proposal).
     this._markActiveRead(this._currentEntityId);
     this._messageStore?.resetNewMessagesCounter();
   }
