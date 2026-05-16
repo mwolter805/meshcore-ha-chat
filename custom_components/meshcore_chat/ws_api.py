@@ -1421,8 +1421,10 @@ async def ws_set_channel(hass, connection, msg):
         # from the channel name) or exactly 16 raw bytes.  Passing a hex string
         # causes a ValueError because len(hex_str) != 16.
         if key:
-            # Custom key from UI is a 64-char hex string → convert to 16 bytes
-            channel_secret = bytes.fromhex(key)[:16]
+            # Custom key from UI is a 32-char hex string (16 bytes, AES-128).
+            # No truncation: if the user supplies the wrong length, let the SDK
+            # raise ValueError so the error surfaces instead of being masked.
+            channel_secret = bytes.fromhex(key)
         else:
             # Let the SDK auto-derive the key from the channel name
             channel_secret = None

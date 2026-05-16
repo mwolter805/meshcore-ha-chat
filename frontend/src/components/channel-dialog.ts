@@ -89,7 +89,7 @@ export class ChannelDialog extends LitElement {
     if (!this.open) return;
 
     const hexLength = this._customKey.length;
-    const hexValid = hexLength === 64 || hexLength === 0 || this._autoKey;
+    const hexValid = hexLength === 32 || hexLength === 0 || this._autoKey;
 
     return html`
       <div
@@ -172,20 +172,20 @@ export class ChannelDialog extends LitElement {
                     <input
                       type="text"
                       class="form-input hex-input"
-                      placeholder="64 hex characters (a-f, 0-9)"
+                      placeholder="32 hex characters (a-f, 0-9)"
                       .value=${this._customKey}
                       @input=${(e: Event) => {
                         const val = (e.target as HTMLInputElement).value
                           .toLowerCase()
                           .replace(/[^a-f0-9]/g, '');
-                        this._customKey = val.slice(0, 64);
+                        this._customKey = val.slice(0, 32);
                       }}
                     />
-                    <div class="hex-counter">${this._customKey.length} / 64 hex characters</div>
+                    <div class="hex-counter">${this._customKey.length} / 32 hex characters</div>
                     <div class="form-description">
                       ${hexValid
-                        ? 'Valid hex key'
-                        : `Invalid: expected 64 characters, got ${hexLength}`}
+                        ? 'Valid hex key (16 bytes / 128-bit AES)'
+                        : `Invalid: expected 32 characters, got ${hexLength}`}
                     </div>
                   </div>
                 `
