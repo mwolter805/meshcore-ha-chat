@@ -4,7 +4,8 @@ import type { HomeAssistant, PanelConfig, Contact, Channel, MeshCoreDevice } fro
 import type { TraceResult } from './api';
 import { panelStyles } from './styles';
 import { MESHCORE_PRESET, DEFAULT_PANEL_CONFIG } from './constants';
-import { getDevices, getContacts, getChannels, getUnreadAndLastRead, removeContact, addContact, traceContact, type TracePathMode } from './api';
+import { getDevices, getContacts, getChannels, getUnreadAndLastRead, markConversationRead, removeContact, addContact, traceContact, type TracePathMode } from './api';
+import { UnreadController } from './chat/unread-controller';
 import './pages/chat-page';
 import './pages/devices-page';
 import './pages/nodes-page';
@@ -29,19 +30,21 @@ export class MeshCorePanel extends LitElement {
   @state() private _loadingStarted = false;
   @state() private _error: string | null = null;
   @state() private _unsubscribeList: Array<() => void> = [];
-  @state() private _unreadCounts: Record<string, number> = {};
   /**
-   * Phase 4 (Change 9): per-entity last-read message-ID cursor map,
-   * sourced from `meshcore_chat/get_unread_counts` (Phase 1 extended
-   * the payload to `{unread, last_read}`). Piped through to
-   * `<chat-page>` as `.lastRead` so the chat page can drive
-   * anchor-based open via `MessageStore.switchEntity(entityId, anchor)`.
+   * Phase 2 (Unify Unread State): the single panel-owned source of
+   * truth for frontend "unread" state. Replaces the former
+   * `@state() _unreadCounts` / `@state() _lastRead` maps. Constructed
+   * once and owned by the panel — the panel is not remounted on tab
+   * switch, so the badge map and the `meshcore_unread_updated`
+   * subscription state persist correctly. `<chat-page>` `subscribe`s
+   * to it (and unsubscribes — but does NOT destroy — on disconnect).
    *
-   * Refreshed on `meshcore_unread_updated` bus events alongside
-   * `_unreadCounts`, and on `unread-cleared` bubbles from chat-page
-   * (since `mark_read` snapshotted a new cursor on the backend).
+   * The controller is NOT `@state()`: its mutations notify
+   * subscribers directly, so the panel does not need to re-render to
+   * propagate an unread change (and the reference passed to
+   * `<chat-page>` is deliberately stable).
    */
-  @state() private _lastRead: Record<string, string> = {};
+  private _unread = new UnreadController();
   @state() private _pendingChatTarget: string | null = null;
   /** Entity ID of the conversation currently being viewed in chat. */
   private _activeChatEntityId: string | null = null;
@@ -523,6 +526,17 @@ export class MeshCorePanel extends LitElement {
     `,
   ];
 
+  constructor() {
+    super();
+    // Phase 2: register the panel's mark-read-requested handler. The
+    // panel owns the WS round-trip + unread bookkeeping; the emitter
+    // (the controller's read-progress mutators) lands in Phase 3, so
+    // this handler is registered-but-unfired in Phase 2.
+    this._unread.onMarkReadRequested((entityId) => {
+      this._handleMarkReadRequested(entityId);
+    });
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this._loadData();
@@ -579,11 +593,11 @@ export class MeshCorePanel extends LitElement {
       this._pendingChatTarget = null;
       // F01 fix: the backend filters unread counts by entry_id (Phase 4
       // ws_get_unread_counts), so stale counts from the previously-
-      // selected entry remain in `_unreadCounts` until the next
-      // `meshcore_unread_updated` bus event fires — could be minutes on
-      // a quiet mesh. Run the unread refresh in parallel with the
-      // contacts/channels refresh; both are independent backend round-
-      // trips against the new entry.
+      // selected entry remain in the controller's count map until the
+      // next `meshcore_unread_updated` bus event fires — could be
+      // minutes on a quiet mesh. Run the unread refresh in parallel
+      // with the contacts/channels refresh; both are independent
+      // backend round-trips against the new entry.
       Promise.all([this._loadDeviceData(), this._loadUnreadCounts()]);
     }
     this._closeDeviceDropdown();
@@ -835,11 +849,9 @@ export class MeshCorePanel extends LitElement {
             .hass=${this.hass}
             .config=${this._config}
             .conversations=${[...this._channels, ...this._contacts.filter(c => c.added_to_node)]}
-            .unreadCounts=${this._unreadCounts}
-            .lastRead=${this._lastRead}
+            .unread=${this._unread}
             .selectedId=${this._pendingChatTarget}
             .narrow=${this.narrow}
-            @unread-cleared=${this._onUnreadCleared}
             @active-entity-changed=${this._onActiveEntityChanged}
             @contacts-changed=${() => this._loadDeviceData()}
             @channels-changed=${() => this._loadDeviceData()}></meshcore-chat-page>`;
@@ -982,23 +994,6 @@ export class MeshCorePanel extends LitElement {
     }
   }
 
-  private _onUnreadCleared(e: CustomEvent) {
-    const { entityId } = e.detail;
-    if (entityId && this._unreadCounts[entityId]) {
-      // Immediately zero out the count locally — don't wait for backend event
-      this._unreadCounts = { ...this._unreadCounts, [entityId]: 0 };
-    }
-    // Phase 4 (Change 9): mark_read also snapshotted a new last-read
-    // cursor on the backend. Refresh the maps so the next conversation
-    // open uses the just-advanced cursor as its anchor. The 2 s save
-    // debounce on UnreadTracker means the persisted file may lag the
-    // in-memory cursor by up to that long, but the in-memory map is
-    // updated synchronously inside `ws_mark_read`, so a fresh
-    // `get_unread_counts` round-trip immediately reflects the new
-    // value.
-    this._loadUnreadCounts();
-  }
-
   private _onActiveEntityChanged(e: CustomEvent) {
     this._activeChatEntityId = e.detail?.entityId || null;
   }
@@ -1040,16 +1035,42 @@ export class MeshCorePanel extends LitElement {
         this.hass,
         this._selectedEntryId || undefined,
       );
-      const counts = result.unread;
-      // Zero out the actively-viewed conversation — user is already reading it
-      if (this._activeChatEntityId && counts[this._activeChatEntityId]) {
-        counts[this._activeChatEntityId] = 0;
-      }
-      this._unreadCounts = counts;
-      this._lastRead = result.last_read;
+      // Phase 2: route the backend payload through the controller.
+      // `ingestBackendData` folds in the actively-viewed-conversation
+      // zeroing that used to be inline here, and notifies the
+      // controller's subscribers (i.e. `<chat-page>`).
+      this._unread.ingestBackendData(result, this._activeChatEntityId);
     } catch {
       // Silently fail
     }
+  }
+
+  /**
+   * The panel's mark-read-requested handler (registered with the
+   * controller in the constructor). Owns the mark-read WS round-trip
+   * plus the unread bookkeeping — optimistic local zero + an
+   * authoritative refresh.
+   *
+   * Phase 3 made this live: the controller's read-progress mutators
+   * (`onScrollState` / `onPillJump`, via the deferred post-switch
+   * timer) now call `requestMarkRead`, which fires this handler. It is
+   * the sole owner of the mark-read round-trip — chat-page's old
+   * direct `markConversationRead` call (in the retired `_markActiveRead`)
+   * and the `unread-cleared` event + `_onUnreadCleared` handler are
+   * all gone.
+   */
+  private _handleMarkReadRequested(entityId: string) {
+    if (!entityId || !this.hass) return;
+    markConversationRead(
+      this.hass,
+      entityId,
+      this._selectedEntryId || undefined,
+    ).catch(() => {
+      // mark_read is idempotent on the backend; the refresh below
+      // reconciles if the round-trip failed.
+    });
+    this._unread.clearEntity(entityId);
+    this._loadUnreadCounts();
   }
 
   private async _handleNodeAction(e: CustomEvent) {

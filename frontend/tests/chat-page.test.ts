@@ -3,13 +3,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { html, render } from 'lit';
 
-// Mock the api module — chat-page imports markConversationRead /
-// sendDirectMessage / sendChannelMessage from '../api'. We need to
-// observe the markConversationRead call (Phase 4 behaviour assertions
-// are entirely about WHEN it does and doesn't fire) while keeping the
-// other helpers stub-callable. message-store imports `getMessagesAround`
-// from the same module — also mocked here so anchor-based opens don't
-// hit a real network path.
+// Mock the api module — chat-page imports sendDirectMessage /
+// sendChannelMessage from '../api', and message-store imports
+// `getMessagesAround` from the same module (mocked here so
+// anchor-based opens don't hit a real network path). As of Phase 3
+// chat-page no longer calls `markConversationRead` directly — the
+// mark-read WS round-trip is the panel's job, fired via the
+// controller's `requestMarkRead` — but the export is kept in the
+// mock factory since other consumers of '../api' may reference it.
 vi.mock('../src/api', () => ({
   markConversationRead: vi.fn(async () => ({ success: true })),
   sendDirectMessage: vi.fn(async () => undefined),
@@ -45,8 +46,7 @@ vi.mock('../src/chat/entity-resolver', () => ({
 // versions.
 import '../src/pages/chat-page';
 import type { ChatPage } from '../src/pages/chat-page';
-import { markConversationRead } from '../src/api';
-import { MARK_READ_GRACE_PERIOD_MS } from '../src/constants';
+import { UnreadController } from '../src/chat/unread-controller';
 import type {
   Channel,
   ChatMessage,
@@ -130,20 +130,16 @@ interface PrivateChatPage {
     _newMessagesWhileAway?: number;
   } | null;
   _currentEntityId: string | null;
-  _markReadGraceUntil: number;
-  _postSwitchMarkReadTimer: ReturnType<typeof setTimeout> | null;
-  /** Change 3.2 — set inside `_markActiveRead`, reset in
-      `_onConversationSelected` and the entry-id-changed branch of
-      `updated()`. Tests in the R9 lifecycle suite read/write this
-      field directly. */
-  _markReadFiredForEntity: string | null;
   _conversationResolved: boolean;
-  _anchorIdAtSelection: string | null;
   _pendingScroll: 'bottom' | 'last-read' | null;
   _scrollInFlight: boolean;
-  _markActiveRead(entityId: string | null): void;
   _onConversationSelected(): void;
   _onChatScroll(e: Event): void;
+  // Phase 3: still chat-page-owned, but reimplemented as a thin
+  // DOM-fact gatherer that delegates the gates to the controller's
+  // `onScrollState`. The read-progress machine itself (anchor, grace,
+  // deferred timer, dedup, markReadFired) moved into UnreadController
+  // — see unread-controller.test.ts for its unit coverage.
   _checkAndMarkReadIfAtBottom(): void;
   _isLastMessageVisible(): boolean;
   _jumpToBottom(): Promise<void>;
@@ -198,14 +194,30 @@ async function mountChatPage(opts: {
   const lastRead = opts.lastRead ?? {};
   const selectedId = opts.selectedId ?? null;
 
+  // Phase 2: chat-page is fed unread state through the panel-owned
+  // `UnreadController` rather than `.unreadCounts` / `.lastRead`
+  // props. Construct one, seed it with the test's backend snapshot,
+  // and bind it. chat-page mirrors `lastRead` off the controller in
+  // `connectedCallback`.
+  //
+  // Phase 4: the pill's cursor-at-tail query (`unread.cursorAtTail`)
+  // reads the controller's authoritative `_lastRead` map, not
+  // chat-page's mirror — so tests that simulate a cursor position
+  // seed it via `page.unread.ingestBackendData({ unread, last_read })`
+  // rather than assigning `page.lastRead` directly. (The mirror still
+  // exists — the `updated()` late-arriving re-anchor block needs it as
+  // its `changedProperties.has('lastRead')` trigger — but it is no
+  // longer the pill's input.)
+  const unread = new UnreadController();
+  unread.ingestBackendData({ unread: unreadCounts, last_read: lastRead }, null);
+
   render(
     html`
       <meshcore-chat-page
         .hass=${hass}
         .config=${config}
         .conversations=${conversations}
-        .unreadCounts=${unreadCounts}
-        .lastRead=${lastRead}
+        .unread=${unread}
         .selectedId=${selectedId}
         .narrow=${false}
       ></meshcore-chat-page>
@@ -229,47 +241,51 @@ afterEach(() => {
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
-describe('Phase 4 — clicking a conversation does NOT call markConversationRead', () => {
-  it('selecting a conversation only switches entity, does not mark-read', async () => {
+// ─── Phase 3 — chat-page drives the UnreadController ─────────────────────
+//
+// Phase 3 moved the read-progress machine into `UnreadController`.
+// chat-page now owns only the DOM facts (scroll geometry,
+// `_isLastMessageVisible`, the non-temp buffer tail) and feeds them
+// into the controller's gates. These integration tests pin that
+// wiring; the gate logic itself (the R1 grace window, the dedup
+// guard, the deferred post-switch timer, the divider projection,
+// `maybeReanchorOnLateData`) is unit-tested in unread-controller.test.ts
+// — see the commit body's test-to-test mapping.
+describe('Phase 3 — chat-page drives the UnreadController', () => {
+  it('selecting a conversation calls beginConversation and does not request mark-read', async () => {
     const page = await mountChatPage({
       conversations: [makeChannel(0)],
       unreadCounts: { 'binary_sensor.meshcore_aa_ch_0_messages': 5 },
     });
-    expect(markConversationRead).not.toHaveBeenCalled();
+    const beginSpy = vi.spyOn(page.unread, 'beginConversation');
+    const markReadSpy = vi.fn();
+    page.unread.onMarkReadRequested(markReadSpy);
 
-    // Drive selection via the property — same code path as the
-    // conversation-list's `conversation-selected` event handler ends up
-    // invoking (`updated()` watches `selectedId` and calls
-    // `_onConversationSelected`).
+    // Drive selection via the property — same code path the
+    // conversation-list's `conversation-selected` handler hits
+    // (`updated()` watches `selectedId` → `_onConversationSelected`).
     page.selectedId = '0';
     await page.updateComplete;
 
-    expect(markConversationRead).not.toHaveBeenCalled();
+    expect(beginSpy).toHaveBeenCalledTimes(1);
+    expect(beginSpy.mock.calls[0][0]).toBe(
+      'binary_sensor.meshcore_aa_ch_0_messages',
+    );
+    // Opening a conversation must not advance the cursor.
+    expect(markReadSpy).not.toHaveBeenCalled();
   });
-});
 
-describe('Phase 4 — viewport-based mark-read trigger', () => {
-  it('scroll near bottom with hasNewerMessages=false fires markConversationRead', async () => {
-    const page = await mountChatPage({
-      conversations: [makeChannel(0)],
-    });
+  it('_onChatScroll near bottom feeds the gathered DOM facts into onScrollState', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';
     await page.updateComplete;
-    // Drain the post-switch grace period so the first auto-mark-read
-    // is allowed to fire.
-    priv(page)._markReadGraceUntil = 0;
-    // Bug #2 fix: chat-page now also gates on geometric "last bubble
-    // visible". Stub it true since the test environment has no
-    // rendered message bubbles (chat-page renders the empty-state
-    // when MessageStore.messages is empty).
     stubLastMessageVisible(page, true);
     expect(priv(page)._messageStore?.hasNewerMessages).toBe(false);
+    const spy = vi.spyOn(page.unread, 'onScrollState');
 
-    // Build a synthetic scroll event whose `target` reports a viewport
-    // sitting at the bottom of the container. Phase 4's
-    // `_onChatScroll` reads scrollTop / scrollHeight / clientHeight off
-    // `e.target`, so a plain object stand-in is enough — we don't have
-    // to render a tall enough <div> to actually overflow.
+    // Synthetic scroll event whose target reports a viewport sitting
+    // at the bottom of the container — `_onChatScroll` reads scrollTop
+    // / scrollHeight / clientHeight off `e.target`.
     const fakeContainer = {
       scrollTop: 1000,
       scrollHeight: 1000,
@@ -277,28 +293,27 @@ describe('Phase 4 — viewport-based mark-read trigger', () => {
     } as unknown as HTMLElement;
     priv(page)._onChatScroll({ target: fakeContainer } as unknown as Event);
 
-    expect(markConversationRead).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        entityId: 'binary_sensor.meshcore_aa_ch_0_messages',
+        lastMessageVisible: true,
+        hasNewerMessages: false,
+      }),
+    );
   });
 
-  it('scroll near bottom with hasNewerMessages=true does NOT fire markConversationRead', async () => {
-    const page = await mountChatPage({
-      conversations: [makeChannel(0)],
-    });
+  it('_onChatScroll near bottom with hasNewerMessages=true does NOT call onScrollState', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';
     await page.updateComplete;
-    priv(page)._markReadGraceUntil = 0;
-    // Force the buffer-tail-not-newest condition (R5c carve-out: being
-    // at the bottom of an after-window with unloaded newer messages on
-    // disk is *not* the same as being caught up).
     const store = priv(page)._messageStore;
     if (store) {
       (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages =
         true;
     }
-    // Last bubble would be visible from the geometric standpoint, but
-    // the !hasNewerMessages gate should still reject mark-read.
     stubLastMessageVisible(page, true);
-    expect(priv(page)._messageStore?.hasNewerMessages).toBe(true);
+    const spy = vi.spyOn(page.unread, 'onScrollState');
 
     const fakeContainer = {
       scrollTop: 1000,
@@ -307,270 +322,128 @@ describe('Phase 4 — viewport-based mark-read trigger', () => {
     } as unknown as HTMLElement;
     priv(page)._onChatScroll({ target: fakeContainer } as unknown as Event);
 
-    expect(markConversationRead).not.toHaveBeenCalled();
+    // `_onChatScroll`'s near-bottom branch routes to loadNewerMessages
+    // when hasNewerMessages is true — the mark-read path is not taken.
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  // Bug #2 regression (post-Phase-4 fix). Pre-fix, mark-read fired
-  // whenever distFromBottom < 150 px, so the user could be 1-2 message
-  // bubbles short of the actual newest message and the cursor would
-  // still advance. The geometric `_isLastMessageVisible` gate fixes
-  // that — even when distFromBottom looks "near bottom" by pixels,
-  // mark-read is suppressed if the last bubble's bottom edge is
-  // below the container's bottom edge.
-  it('scroll near bottom but last bubble NOT visible does NOT fire markConversationRead (Bug #2)', async () => {
-    const page = await mountChatPage({
-      conversations: [makeChannel(0)],
-    });
+  it('_checkAndMarkReadIfAtBottom resets the pill counter when the controller fires a mark-read', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';
     await page.updateComplete;
-    priv(page)._markReadGraceUntil = 0;
-    // Geometric gate says: last bubble is below the container bottom
-    // (e.g. user is 80 px short of seeing the newest message, but
-    // distFromBottom = 80 < 150 still triggers atBottom in the
-    // pre-fix code).
-    stubLastMessageVisible(page, false);
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    const resetSpy = vi.spyOn(store, 'resetNewMessagesCounter');
+    vi.spyOn(page.unread, 'onScrollState').mockReturnValue(true);
 
-    const fakeContainer = {
-      scrollTop: 1000,
-      scrollHeight: 1000,
-      clientHeight: 1000,
-    } as unknown as HTMLElement;
-    priv(page)._onChatScroll({ target: fakeContainer } as unknown as Event);
-
-    expect(markConversationRead).not.toHaveBeenCalled();
-  });
-});
-
-describe('Phase 4 — mark-read 1000ms grace period after switch', () => {
-  it('first auto-mark-read after switch is suppressed for MARK_READ_GRACE_PERIOD_MS', async () => {
-    // Anchor the value to the constant so the test name and the
-    // assertion drift together. Also pins the proposal's stale "500ms"
-    // line in §"Implementation Order" — Phase 4's own commit fixes
-    // that to 1000ms.
-    expect(MARK_READ_GRACE_PERIOD_MS).toBe(1000);
-
-    const page = await mountChatPage({
-      conversations: [makeChannel(0)],
-    });
-    page.selectedId = '0';
-    await page.updateComplete;
-    // Bug #2 fix gate — make sure the grace-period gate is the one
-    // suppressing the call, not the geometric gate.
-    stubLastMessageVisible(page, true);
-
-    // Grace timer is armed by `_onConversationSelected` to roughly
-    // `Date.now() + MARK_READ_GRACE_PERIOD_MS`. Give it a small slack
-    // window for the time elapsed since the property assignment above.
-    const remaining = priv(page)._markReadGraceUntil - Date.now();
-    expect(remaining).toBeGreaterThan(MARK_READ_GRACE_PERIOD_MS - 500);
-    expect(remaining).toBeLessThanOrEqual(MARK_READ_GRACE_PERIOD_MS);
-
-    // Inside the grace window: scroll-to-bottom does NOT fire mark-read.
     priv(page)._checkAndMarkReadIfAtBottom();
-    expect(markConversationRead).not.toHaveBeenCalled();
 
-    // Past the grace window: same call DOES fire mark-read.
-    // (Phase 2 / Change 2.1: the user-engagement scroll gate was
-    // removed; the grace-period gate is the only one left for this
-    // case.)
-    priv(page)._markReadGraceUntil = 0;
-    priv(page)._checkAndMarkReadIfAtBottom();
-    expect(markConversationRead).toHaveBeenCalledTimes(1);
-  });
-});
-
-// Bug #1 regression (post-Phase-4 fix). Pre-fix, low-unread opens
-// would leave the indicator stuck visible because the divider's
-// scroll-into-view fires its scroll event INSIDE the grace window,
-// the synchronous mark-read gets suppressed, and no further scroll
-// events fire on their own. The fix is a deferred re-check
-// scheduled in `_onConversationSelected` for
-// `MARK_READ_GRACE_PERIOD_MS` later.
-describe('Bug #1 — deferred mark-read after grace period elapses', () => {
-  it('switchEntity arms a one-shot timer that fires markConversationRead after grace', async () => {
-    vi.useFakeTimers();
-    try {
-      const page = await mountChatPage({
-        conversations: [makeChannel(0)],
-      });
-      // Geometric "last bubble visible" must return true for the
-      // deferred re-check to fire — otherwise we'd be testing two
-      // gates at once. Real low-unread opens land the user with the
-      // last bubble visible (1-2 unread fit in the viewport easily).
-      stubLastMessageVisible(page, true);
-
-      page.selectedId = '0';
-      await page.updateComplete;
-
-      // Timer is now armed; pre-elapse, nothing has fired.
-      expect(priv(page)._postSwitchMarkReadTimer).not.toBeNull();
-      expect(markConversationRead).not.toHaveBeenCalled();
-
-      // Advance fake timers past the grace period. The timer's
-      // callback runs, _checkAndMarkReadIfAtBottom is called, all
-      // gates pass, mark-read fires.
-      vi.advanceTimersByTime(MARK_READ_GRACE_PERIOD_MS + 50);
-      expect(markConversationRead).toHaveBeenCalledTimes(1);
-      expect(priv(page)._postSwitchMarkReadTimer).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(resetSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('a quick conversation flip cancels the in-flight deferred re-check', async () => {
-    vi.useFakeTimers();
-    try {
-      const page = await mountChatPage({
-        conversations: [makeChannel(0), makeChannel(1)],
-      });
-      stubLastMessageVisible(page, true);
-
-      page.selectedId = '0';
-      await page.updateComplete;
-      const firstTimer = priv(page)._postSwitchMarkReadTimer;
-      expect(firstTimer).not.toBeNull();
-
-      // User flips to a different conversation before the grace
-      // period elapses. The first timer should be cancelled and a
-      // fresh one armed for the new entity.
-      page.selectedId = '1';
-      await page.updateComplete;
-      const secondTimer = priv(page)._postSwitchMarkReadTimer;
-      expect(secondTimer).not.toBe(firstTimer);
-
-      // Elapse the grace period. Only ONE mark-read fires (for
-      // entity '1'), not two — the entity '0' timer was cancelled.
-      vi.advanceTimersByTime(MARK_READ_GRACE_PERIOD_MS + 50);
-      expect(markConversationRead).toHaveBeenCalledTimes(1);
-      // The fired call's first arg (entity_id) should be channel 1's
-      // entity, confirming the cancelled timer didn't slip through.
-      const lastCall = (markConversationRead as ReturnType<typeof vi.fn>).mock
-        .calls[0];
-      expect(lastCall[1]).toBe('binary_sensor.meshcore_aa_ch_1_messages');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe('Phase 4 — _jumpToBottom loads any unloaded newer messages and scrolls', () => {
-  it('drains hasNewerMessages, scrolls to bottom, fires mark-read, resets counter', async () => {
-    const page = await mountChatPage({
-      conversations: [makeChannel(0)],
-    });
+  it('_checkAndMarkReadIfAtBottom does NOT reset the pill counter when the controller suppresses the mark-read', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';
     await page.updateComplete;
+    const store = priv(page)._messageStore;
+    if (!store) throw new Error('expected store');
+    const resetSpy = vi.spyOn(store, 'resetNewMessagesCounter');
+    vi.spyOn(page.unread, 'onScrollState').mockReturnValue(false);
 
+    priv(page)._checkAndMarkReadIfAtBottom();
+
+    expect(resetSpy).not.toHaveBeenCalled();
+  });
+
+  it('_jumpToBottom drains hasNewerMessages then routes through onPillJump', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
     const store = priv(page)._messageStore;
     if (!store) throw new Error('expected store');
 
-    // Spy on loadNewerMessages — count how many times the loop iterates.
-    // Each call flips _hasNewerMessages closer to false; after 2 calls
-    // we report "caught up" so the loop exits.
+    // Spy on loadNewerMessages — each call flips _hasNewerMessages
+    // closer to false; after 2 calls report "caught up" so the loop
+    // exits.
     let calls = 0;
-    const original = store.loadNewerMessages.bind(store);
     store.loadNewerMessages = vi.fn(async () => {
       calls++;
       if (calls >= 2) {
         (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages =
           false;
       }
-      // Don't actually invoke the original — it would callWS through
-      // hass.callWS and we want this test to be a unit test of the
-      // jump-loop only. `original` is held as a no-op fallback.
-      void original;
     }) as typeof store.loadNewerMessages;
-
-    // Pre-set state: there are unloaded newer messages on disk AND the
-    // counter has accumulated arrivals.
     (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages =
       true;
-    (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway =
-      3;
-    expect(store.hasNewerMessages).toBe(true);
-    expect(store.newMessagesWhileAway).toBe(3);
 
-    // Bypass grace period — _jumpToBottom is a user-explicit action.
-    priv(page)._markReadGraceUntil = 0;
-    // _jumpToBottom scrolls to scrollHeight which IS the actual
-    // bottom; in the real DOM the last bubble would be visible. Stub
-    // it true since the test environment has no rendered bubbles.
-    stubLastMessageVisible(page, true);
+    const pillSpy = vi.spyOn(page.unread, 'onPillJump');
 
     await priv(page)._jumpToBottom();
     // Yield once for the rAF callback inside _jumpToBottom to run.
     await new Promise((r) => requestAnimationFrame(() => r(undefined)));
     await new Promise((r) => setTimeout(r, 10));
 
-    // Loop iterated until hasNewerMessages flipped false.
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(store.hasNewerMessages).toBe(false);
-    // Mark-read fired (confirms _checkAndMarkReadIfAtBottom ran past
-    // the now-zero grace timer).
-    expect(markConversationRead).toHaveBeenCalled();
-    // Counter reset by the chained resetNewMessagesCounter inside
-    // _checkAndMarkReadIfAtBottom.
-    expect(store.newMessagesWhileAway).toBe(0);
+    expect(pillSpy).toHaveBeenCalledTimes(1);
+    expect(pillSpy.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        entityId: 'binary_sensor.meshcore_aa_ch_0_messages',
+      }),
+    );
+  });
+
+  it('the late-arriving lastRead block delegates the re-anchor decision to the controller', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const entityId = priv(page)._currentEntityId!;
+    // Post-initial-render conditions the re-anchor block expects:
+    // resolved conversation, no pending scroll already queued.
+    priv(page)._pendingScroll = null;
+    priv(page)._conversationResolved = true;
+    const reanchorSpy = vi
+      .spyOn(page.unread, 'maybeReanchorOnLateData')
+      .mockReturnValue(true);
+
+    // lastRead arrives → updated()'s late-arriving block fires and
+    // hands the decision to the controller.
+    page.lastRead = { [entityId]: 'late-anchor' };
+    await page.updateComplete;
+
+    expect(reanchorSpy).toHaveBeenCalledWith(entityId);
+  });
+
+  it('the late-arriving lastRead block does NOT queue a scroll when the controller declines to re-anchor', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    const entityId = priv(page)._currentEntityId!;
+    priv(page)._pendingScroll = null;
+    priv(page)._conversationResolved = true;
+    vi.spyOn(page.unread, 'maybeReanchorOnLateData').mockReturnValue(false);
+
+    page.lastRead = { [entityId]: 'late-anchor' };
+    await page.updateComplete;
+
+    expect(priv(page)._pendingScroll).toBeNull();
   });
 });
 
-// R9 (Phase 2 / Change 3.2). The `_markReadFiredForEntity` field
-// replaces the previous draft's misuse of `_postSwitchMarkReadTimer`
-// as a "mark_read has not fired" signal. Pin its lifecycle so a
-// future refactor can't silently bypass `_markActiveRead` and break
-// the late-arriving-`lastRead` block's correctness.
-describe('Phase 2 / R9 — _markReadFiredForEntity lifecycle', () => {
-  it('starts null', async () => {
-    const page = await mountChatPage({ conversations: [makeChannel(0)] });
-    expect(priv(page)._markReadFiredForEntity).toBeNull();
-  });
-
-  it('_markActiveRead(entityId) sets the flag to that entity', async () => {
+// ─── chat-page — selection lifecycle ─────────────────────────────────────
+//
+// chat-page-owned selection-state behavior that survived Phase 3
+// unchanged (it never touched the moved read-progress fields). The
+// entry-switch test is rewritten to assert the controller teardown
+// (`endConversation`) rather than the deleted `_markReadFiredForEntity`
+// flag; the never-auto-selects test is verbatim.
+describe('chat-page — selection lifecycle', () => {
+  it('entry switch tears down read-progress and auto-clears selectedId on the child', async () => {
     const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';
     await page.updateComplete;
-    const entityId = priv(page)._currentEntityId;
-    expect(entityId).not.toBeNull();
-    expect(priv(page)._markReadFiredForEntity).toBeNull();
-
-    priv(page)._markActiveRead(entityId);
-    expect(priv(page)._markReadFiredForEntity).toBe(entityId);
-  });
-
-  it('_markActiveRead(null) is a no-op (does NOT set the flag)', async () => {
-    const page = await mountChatPage({ conversations: [makeChannel(0)] });
-    priv(page)._markReadFiredForEntity = 'preexisting';
-    priv(page)._markActiveRead(null);
-    // Pre-existing value preserved: the early-return path inside
-    // `_markActiveRead` short-circuits before the assignment, which
-    // is fine because there's no entity context for the flag to
-    // pertain to.
-    expect(priv(page)._markReadFiredForEntity).toBe('preexisting');
-  });
-
-  it('conversation switch resets the flag', async () => {
-    const page = await mountChatPage({
-      conversations: [makeChannel(0), makeChannel(1)],
-    });
-    page.selectedId = '0';
-    await page.updateComplete;
-    priv(page)._markActiveRead(priv(page)._currentEntityId);
-    expect(priv(page)._markReadFiredForEntity).not.toBeNull();
-
-    // Flip to the other conversation — `_onConversationSelected`
-    // resets the flag.
-    page.selectedId = '1';
-    await page.updateComplete;
-    expect(priv(page)._markReadFiredForEntity).toBeNull();
-  });
-
-  it('entry switch resets the flag and auto-clears selectedId on the child', async () => {
-    const page = await mountChatPage({ conversations: [makeChannel(0)] });
-    page.selectedId = '0';
-    await page.updateComplete;
-    priv(page)._markActiveRead(priv(page)._currentEntityId);
-    expect(priv(page)._markReadFiredForEntity).not.toBeNull();
     expect(priv(page)._conversationResolved).toBe(true);
+    const endSpy = vi.spyOn(page.unread, 'endConversation');
 
     // Real-world repro: the parent panel writes
     // `this._pendingChatTarget = null` in `_selectDevice`, but
@@ -584,10 +457,12 @@ describe('Phase 2 / R9 — _markReadFiredForEntity lifecycle', () => {
     // doesn't self-clear, `selectedId` stays at '0' and
     // `_renderChatArea` falls into the "Conversation unavailable"
     // branch (a stale-selection regression observed during Phase 2
-    // post-deploy testing).
+    // post-deploy testing). Phase 3: the entry-switch branch now
+    // also calls `this.unread.endConversation()` to tear down the
+    // controller's read-progress state.
     page.config = makeConfig({ entry_id: 'other-entry' });
     await page.updateComplete;
-    expect(priv(page)._markReadFiredForEntity).toBeNull();
+    expect(endSpy).toHaveBeenCalledTimes(1);
     expect(page.selectedId).toBeNull();
     expect(priv(page)._currentEntityId).toBeNull();
     expect(priv(page)._conversationResolved).toBe(false);
@@ -632,50 +507,6 @@ describe('Phase 2 / R9 — _markReadFiredForEntity lifecycle', () => {
     await page.updateComplete;
     expect(page.selectedId).toBeNull();
     expect(priv(page)._currentEntityId).toBeNull();
-  });
-
-  it('late-arriving lastRead re-anchors when the flag is null', async () => {
-    const page = await mountChatPage({ conversations: [makeChannel(0)] });
-    page.selectedId = '0';
-    await page.updateComplete;
-    const entityId = priv(page)._currentEntityId!;
-    // Simulate the fresh-panel-load race: the user picked the
-    // conversation before lastRead arrived, so the anchor was
-    // captured as null and pendingScroll fell through to 'bottom'
-    // (which the executor already consumed during the initial
-    // updated() pass). Force the post-initial-render conditions the
-    // re-anchor block expects.
-    priv(page)._anchorIdAtSelection = null;
-    priv(page)._pendingScroll = null;
-    priv(page)._conversationResolved = true;
-    priv(page)._markReadFiredForEntity = null;
-
-    // lastRead arrives.
-    page.lastRead = { [entityId]: 'msg-anchor-id' };
-    await page.updateComplete;
-
-    expect(priv(page)._anchorIdAtSelection).toBe('msg-anchor-id');
-  });
-
-  it('late-arriving lastRead does NOT re-anchor when mark_read already fired for this entity', async () => {
-    const page = await mountChatPage({ conversations: [makeChannel(0)] });
-    page.selectedId = '0';
-    await page.updateComplete;
-    const entityId = priv(page)._currentEntityId!;
-    // Simulate: user opened the conversation, mark_read fired
-    // (scroll-driven or otherwise — see _markActiveRead set-site).
-    priv(page)._anchorIdAtSelection = null;
-    priv(page)._pendingScroll = null;
-    priv(page)._conversationResolved = true;
-    priv(page)._markReadFiredForEntity = entityId; // <-- fired
-
-    // lastRead arrives — but it now reflects the conversation tail
-    // (mark_read advanced it). Re-anchoring here would suppress the
-    // divider entirely. The block must decline.
-    page.lastRead = { [entityId]: 'msg-tail-id' };
-    await page.updateComplete;
-
-    expect(priv(page)._anchorIdAtSelection).toBeNull();
   });
 });
 
@@ -801,7 +632,12 @@ describe('Phase 4 — indicator visibility', () => {
     ];
     (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
     (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
-    page.lastRead = { [entityId]: 'msg-tail-id' };
+    // Cursor at the buffer tail — seed the controller (the pill's
+    // `cursorAtTail` query reads the controller, not the mirror).
+    page.unread.ingestBackendData(
+      { unread: {}, last_read: { [entityId]: 'msg-tail-id' } },
+      null,
+    );
     // Stub the unread-below-viewport check to true (user is scrolled
     // up; the divider is still rendered above the viewport, last
     // bubble below).
@@ -846,8 +682,12 @@ describe('Phase 4 — indicator visibility', () => {
     (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
     // Cursor is at the buffer tail (conversation has been fully read
     // — possibly never had unread on this visit, so no divider was
-    // rendered).
-    page.lastRead = { [entityId]: 'msg-only' };
+    // rendered). Seed the controller — the pill's `cursorAtTail` query
+    // reads the controller's `_lastRead`, not chat-page's mirror.
+    page.unread.ingestBackendData(
+      { unread: {}, last_read: { [entityId]: 'msg-only' } },
+      null,
+    );
     (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
       () => true;
     clearScrollSettlingState(page);
@@ -984,8 +824,13 @@ describe('Phase 4 — indicator visibility', () => {
     ];
     (store as unknown as { _hasNewerMessages: boolean })._hasNewerMessages = false;
     (store as unknown as { _newMessagesWhileAway: number })._newMessagesWhileAway = 0;
-    // Cursor at older message → newer is unread.
-    page.lastRead = { [entityId]: 'msg-older' };
+    // Cursor at older message → newer is unread. Seed the controller —
+    // the pill's `cursorAtTail` query reads the controller's
+    // `_lastRead`, not chat-page's mirror.
+    page.unread.ingestBackendData(
+      { unread: {}, last_read: { [entityId]: 'msg-older' } },
+      null,
+    );
     (page as unknown as { _hasContentBelowViewport: () => boolean })._hasContentBelowViewport =
       () => true;
     clearScrollSettlingState(page);
@@ -998,3 +843,10 @@ describe('Phase 4 — indicator visibility', () => {
     expect(text).not.toContain('latest');
   });
 });
+
+// The Phase 1 divider-projection tests that used to live here moved
+// into unread-controller.test.ts §"dividerAfterGroupIdx" — they poked
+// the now-deleted `_renderItemsWithDivider` + `_anchorIdAtSelection` /
+// `_unreadCountAtSelection` privates, and the divider logic is now a
+// pure projection on the controller. The Phase 3 send-then-switch
+// fix is covered there too (the leading-outgoing-skip case).

@@ -116,9 +116,12 @@ export const LAST_READ_SAVE_DEBOUNCE_MS = 2000;
  * conversation opens, even if the user immediately scrolls UP without
  * reading.
  *
- * Phase 4's `_onChatScroll` arms a one-shot timer of this duration on
- * every conversation switch; the FIRST auto-mark-read after the switch
- * waits for the timer to elapse. Subsequent mark-reads in the same
- * conversation fire without delay.
+ * As of the Unify Unread State Phase 3 refactor this constant is
+ * consumed by `UnreadController` (not chat-page): `beginConversation`
+ * stamps `ReadProgress.graceUntil = Date.now() + this` and arms a
+ * one-shot deferred post-switch timer of this duration. The FIRST
+ * auto-mark-read after a conversation switch waits for the grace
+ * window to elapse; subsequent mark-reads in the same conversation
+ * fire without delay. Value unchanged by the refactor.
  */
 export const MARK_READ_GRACE_PERIOD_MS = 1000;

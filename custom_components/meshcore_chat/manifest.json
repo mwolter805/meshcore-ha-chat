@@ -1,13 +1,13 @@
 {
   "domain": "meshcore_chat",
   "name": "MeshCore Chat",
-  "version": "0.2.0",
   "codeowners": ["@mwolter805"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "websocket_api", "meshcore"],
   "documentation": "https://github.com/mwolter805/meshcore-ha-chat",
-  "issue_tracker": "https://github.com/mwolter805/meshcore-ha-chat/issues",
   "integration_type": "service",
   "iot_class": "local_push",
-  "requirements": ["pynacl>=1.5.0"]
+  "issue_tracker": "https://github.com/mwolter805/meshcore-ha-chat/issues",
+  "requirements": ["pynacl>=1.5.0"],
+  "version": "0.2.0"
 }

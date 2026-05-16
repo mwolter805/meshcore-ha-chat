@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Contact, Channel } from '../types';
+import type { UnreadController } from '../chat/unread-controller';
 // manage-dialog is loaded by chat-page
 
 type ChatFilter = 'all' | 'unread' | 'dms' | 'channels';
@@ -9,6 +10,17 @@ type ChatFilter = 'all' | 'unread' | 'dms' | 'channels';
 export class ConversationList extends LitElement {
   @property({ type: Array }) conversations: Array<Contact | Channel> = [];
   @property({ type: String }) activeId: string | null = null;
+  /**
+   * Phase 2 (Unify Unread State): the panel-owned `UnreadController`.
+   * `_getUnreadCount` reads the badge value from `unread.badgeCount`.
+   */
+  @property({ attribute: false }) unread!: UnreadController;
+  /**
+   * Phase 2: still bound (`.unreadCounts=${unread.counts}` from
+   * chat-page) — its fresh identity on every controller mutation is
+   * what re-renders this component. The badge VALUE, however, now
+   * comes from the controller via `_getUnreadCount`.
+   */
   @property({ type: Object }) unreadCounts: Record<string, number> = {};
   @property({ type: String }) nodePrefix: string | null = null;
 
@@ -390,38 +402,15 @@ export class ConversationList extends LitElement {
   }
 
   private _getUnreadCount(id: string): number {
-    // unreadCounts is keyed by entity_id (e.g., binary_sensor.meshcore_1ed4c1_ch_1_messages
-    // or binary_sensor.meshcore_1ed4c1_fe3af5_messages).
-    // Match using the specific entity suffix pattern to avoid false positives
-    // (e.g., channel "1" matching inside any entity containing the digit "1").
-    //
-    // Phase 4 (F-B): Channel matches additionally require the entry's
-    // pubkey-prefix segment; otherwise same-named channels on different
-    // upstream entries cross-contaminate (e.g., entry A's #test count
-    // appearing on entry B's #test). When nodePrefix is null (single-
-    // entry installs, or initial render before config arrives), fall
-    // back to the suffix-only match for backwards compatibility.
-    const channelNeedle = this.nodePrefix
-      ? `meshcore_${this.nodePrefix}_ch_${id}_messages`
-      : null;
-    for (const [entityId, count] of Object.entries(this.unreadCounts)) {
-      if (count <= 0) continue;
-      // Channel: id is a numeric string like "1" → match _ch_1_messages
-      if (/^\d+$/.test(id)) {
-        if (channelNeedle) {
-          if (entityId.endsWith(channelNeedle)) return count;
-        } else if (entityId.endsWith(`_ch_${id}_messages`)) {
-          return count;
-        }
-      } else {
-        // Contact: id is a hex pubkey prefix (12 chars) → match _{first6}_messages.
-        // Contact pubkey prefixes are globally unique across entries,
-        // so node_prefix scoping is unnecessary here.
-        const prefix6 = id.substring(0, 6);
-        if (entityId.endsWith(`_${prefix6}_messages`)) return count;
-      }
-    }
-    return 0;
+    // Phase 2: unified badge projection. `UnreadController.badgeCount`
+    // is the single implementation backing this and
+    // `chat-page._getUnreadCountForSelected`. It owns the entity-id
+    // suffix matching, the Phase-4 (F-B) node_prefix scoping for
+    // channels (so same-named channels on different upstream entries
+    // don't cross-contaminate), and the suffix-only fallback when
+    // nodePrefix is null. The `unread` prop is always supplied by
+    // chat-page; the guard covers the brief pre-binding window.
+    return this.unread ? this.unread.badgeCount(id, this.nodePrefix) : 0;
   }
 
   private _updateFiltered() {
