@@ -186,9 +186,8 @@ async def async_setup_entry(
     # WS handlers expect to find it (hass.data[DOMAIN]["unread_tracker"]).
     #
     # ``entry_id`` is wired through so the tracker's persistent
-    # ``last_read`` Store key is parametrised — see Phase 1 of the
-    # last-read anchor proposal. The Store is hydrated synchronously
-    # here so handlers reading the cursor map (``get_all_last_read``,
+    # ``last_read`` Store key is parametrised. The Store is hydrated
+    # synchronously here so handlers reading the cursor map (``get_all_last_read``,
     # ``get_last_read``) on first connect see the persisted state, not
     # an empty dict.
     if "unread_tracker" not in bucket:
@@ -267,10 +266,9 @@ async def async_unload_entry(
     # Flush any pending debounced last-read save before tearing down
     # process-global state. The tracker is a singleton across entries,
     # so flushing here covers the multi-entry case as well — a no-op
-    # when no debounce is pending. R6 mitigation in the Phase 1 proposal
-    # (`Last-Read Anchor and Read-Receipt Refinement for Chat Panel`):
-    # without this, a `mark_read` followed immediately by HA stop could
-    # lose the cursor snapshot inside the 2 s debounce window.
+    # when no debounce is pending. Without this, a `mark_read` followed
+    # immediately by HA stop could lose the cursor snapshot inside the
+    # 2 s debounce window.
     bucket = hass.data.get(DOMAIN, {})
     tracker = bucket.get("unread_tracker")
     if tracker is not None:
@@ -299,9 +297,8 @@ async def async_unload_entry(
         # its in-memory counts are cleared so a re-added entry starts
         # fresh rather than inheriting stale counts from the previous
         # entry. ``clear()`` deliberately preserves the persistent
-        # ``_last_read`` map (locked decision 2026-05-04, Change 1) —
-        # cursors survive reload so the user doesn't lose read positions
-        # on routine integration restarts.
+        # ``_last_read`` map — cursors survive reload so the user doesn't
+        # lose read positions on routine integration restarts.
         if tracker is not None:
             tracker.clear()
 
@@ -360,8 +357,8 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
             msg_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
         # Build the stored record from whatever fields the event carries.
-        # Per Adaptation 4 in the proposal, missing fields like hop_count
-        # and snr are simply not present in the dict.
+        # Missing fields like hop_count and snr are simply not present in
+        # the dict.
         record: dict[str, Any] = {
             "id": msg_id,
             "sender": data.get("sender_name") or data.get("sender") or "",
@@ -387,16 +384,16 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
             if k in data:
                 record[k] = data[k]
 
-        # Backfill path_nodes/hop_count on rx_log entries — companion-supporting
-        # dev/combined emits `path` + `path_len` but not the convenience fields
-        # the frontend reads. Mirrors what feature/sidebar-panel did at source.
+        # Backfill path_nodes/hop_count on rx_log entries — the upstream
+        # coordinator this companion consumes emits `path` + `path_len` but
+        # not the convenience fields the frontend reads.
         if record.get("rx_log_data"):
             enrich_rx_log_entries(record["rx_log_data"])
 
         # Route-popup synth for DMs. Channel messages get per-repeater rx_log_data
         # arrays via the upstream RX_LOG correlation pass; DMs don't — they
         # carry hop_count + snr at the top level of the event payload (added
-        # by upstream PR #215 / feature/dm-signal-metadata). The frontend's
+        # by upstream PR #215). The frontend's
         # message-bubble route popup keys off rx_log_data, so synthesize a
         # single-entry array from the top-level fields when only those are
         # present. The frontend then renders the popup as if it were a 1-entry
@@ -434,8 +431,7 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
         # from the store + persistent cursor and fire
         # EVENT_UNREAD_UPDATED with the new count attached so the
         # panel's `_loadUnreadCounts` round-trip sees the updated value
-        # on refetch. Phase 1 of `Cursor-Derived Unread Count and Mark-
-        # Read Gate Fix` (2026-05-08): replaces the prior
+        # on refetch. This replaces the prior
         # `tracker.mark_unread(entity_id)` call. The derivation reads
         # from `store` (which has just been written to via
         # `store.store_message` above) so the count reflects the post-
@@ -458,9 +454,8 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
 def _make_delivery_update_handler(hass: HomeAssistant, entry_id: str):
     """Return a listener that applies meshcore_delivery_update to a stored message.
 
-    Per Adaptation 5 in the proposal: if ``entity_id`` is missing on the
-    event (pre-PR-B), fall back to an all-conversations scan to locate the
-    message by id.
+    If ``entity_id`` is missing on the event (older event format), fall
+    back to an all-conversations scan to locate the message by id.
     """
 
     async def _handle(event: Event) -> None:

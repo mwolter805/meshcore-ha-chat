@@ -19,8 +19,8 @@ export class MessageSearch extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: structurally a side panel, not a modal — but the
-    // proposal's a11y pass treats it like one so keyboard-only users
+    // Structurally a side panel, not a modal — but the a11y treatment
+    // gives it modal-like keyboard handling so keyboard-only users
     // have a consistent dismiss key. Tab still cycles within the panel;
     // the parent (chat-page) listens for `search-close` to hide it.
     attachDialogA11y(this, {

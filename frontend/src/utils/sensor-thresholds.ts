@@ -6,13 +6,12 @@
 //
 // Band statements without a published source are presented without a citation
 // line rather than fabricating one or labelling them "TBD" — this is the
-// project's locked convention (see Proposed - Sensor Aggregation Card.md
-// §"Threshold table" and §"Open questions — resolved").
+// project's standing convention.
 //
 // Battery voltage is intentionally NOT a MetricKey: chemistry varies by board
 // (LiPo / LiFePO4 / 18650) and the integration does not expose chemistry per
 // node, so voltage rows render as informational with no band colour. Only
-// battery_percentage drives the battery bar's colour. (Q3 resolution.)
+// battery_percentage drives the battery bar's colour.
 
 export type MetricKey =
   | 'battery_pct'
@@ -222,7 +221,7 @@ const METRICS: Record<MetricKey, MetricSpec> = {
       'Number of messages queued for transmission. ' +
       'Healthy nodes drain the queue quickly. Sustained backlog (> 10) ' +
       'indicates channel saturation or a stuck transmitter.',
-    // Threshold sourced from the proposal mockup; no published MeshCore band.
+    // Threshold is a UI design choice; no published MeshCore band.
   },
 
   temperature: {

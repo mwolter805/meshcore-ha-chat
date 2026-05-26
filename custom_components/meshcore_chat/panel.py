@@ -1,6 +1,6 @@
 """MeshCore Chat sidebar panel registration.
 
-Adapted from upstream `feature/sidebar-panel:custom_components/meshcore/panel.py`.
+Adapted from the upstream meshcore integration's panel registration.
 
 Differences vs. upstream:
 - All HTTP/sidebar URLs are scoped under `meshcore_chat` so the companion
@@ -34,8 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 # entry reloads (the module is imported once per process), while the
 # sidebar entry is registered per `async_register_panel` call as before.
 # The flag resets to False naturally on HA restart (fresh import).
-# See `docs/Forensics - Chat Companion Reload Failure.md` §F01 for the
-# full root-cause analysis.
 _static_path_registered = False
 
 # HTTP URL the bundle is served at; module_url below points at this path.

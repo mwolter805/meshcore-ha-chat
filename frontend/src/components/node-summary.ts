@@ -376,7 +376,7 @@ export class NodeSummary extends LitElement {
 
   private _renderBatteryTile() {
     const battery = this._findByMetric('battery_pct');
-    if (!battery) return nothing; // mains-powered node — omit tile (Q3)
+    if (!battery) return nothing; // mains-powered node — omit tile
     const pct = this._readNumber(battery.entity_id);
     const voltage = this._findEntityIdMatching('battery_voltage') ?? this._findEntityByLabel('Voltage');
     const voltageVal = voltage ? this._readNumber(voltage.entity_id) : NaN;

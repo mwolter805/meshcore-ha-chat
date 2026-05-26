@@ -1,12 +1,11 @@
 """MeshCore Chat WebSocket API.
 
-Lifted from upstream feature/sidebar-panel ws_api.py for the companion
-integration. All type strings are namespaced under meshcore_chat/* to
-avoid collision with upstream meshcore/* commands. Coordinator state
-lookups go via hass.data[MESHCORE_DOMAIN] because the chat panel acts
-as a consumer of the upstream meshcore integration's coordinator.
-
-See proposal Change 5 (extended scope per 2026-04-22 user direction).
+Lifted from the upstream meshcore integration's ws_api.py for the
+companion integration. All type strings are namespaced under
+meshcore_chat/* to avoid collision with upstream meshcore/* commands.
+Coordinator state lookups go via hass.data[MESHCORE_DOMAIN] because the
+chat panel acts as a consumer of the upstream meshcore integration's
+coordinator.
 """
 from __future__ import annotations
 
@@ -39,7 +38,7 @@ from .utils import format_entity_id, sanitize_name
 _LOGGER = logging.getLogger(__name__)
 
 
-# ─── Exception translations (Q10 half-step) ──────────────────────────────
+# ─── Exception translations ──────────────────────────────────────────────
 #
 # `strings.json` and `translations/en.json` carry the canonical user-facing
 # exception messages keyed under the top-level ``exceptions`` block. The
@@ -132,17 +131,14 @@ def _resolve_coordinator(hass: HomeAssistant, entry_id: str | None = None):
         This is the legitimate "I don't care which one" path used by
         commands that operate on singleton state.
 
-    Note on scope (Phase 5, Change 4 / forensics §F-D Fix D.3): this
-    hardening only protects code paths that actually call
-    ``_get_coordinator(...)`` / ``_resolve_coordinator(...)``. Handlers
+    Note on scope: this hardening only protects code paths that actually
+    call ``_get_coordinator(...)`` / ``_resolve_coordinator(...)``. Handlers
     that accept ``entry_id`` in their schema but ignore it at the body
     level (SILENT-IGNORE — caught by
     ``tests/components/meshcore_chat/test_ws_api_entry_id_audit.py``)
     or route through a different resolver (e.g., ``_get_store`` — see
-    its symmetric Phase 5 hardening for the chat-companion lookup)
-    need their own coverage. See
-    ``docs/Forensics - Multi-Entry Switching Analysis.md`` §F-C and
-    §F-D for the full audit and gap analysis.
+    its symmetric hardening for the chat-companion lookup) need their
+    own coverage.
     """
     if MESHCORE_DOMAIN not in hass.data:
         return None
@@ -221,7 +217,7 @@ def _get_all_coordinators(hass: HomeAssistant) -> list:
 # ``exceptions`` block, not a literal message. ``_ws_send_error_safe``
 # resolves it via ``_t(key)`` so the user-facing text lives in
 # ``strings.json`` / ``translations/en.json`` rather than scattered
-# across the code (Q10 half-step). The WS error *codes* (the second
+# across the code. The WS error *codes* (the second
 # tuple element) are unchanged — clients keying on ``timeout`` /
 # ``not_connected`` / ``invalid`` continue to work.
 _WS_ERROR_MAP: list[tuple[type[BaseException], str, str]] = [
@@ -249,7 +245,7 @@ def _ws_send_error_safe(
 
     User-facing messages are resolved via ``_t(translation_key)`` so the
     canonical text lives in ``strings.json`` / ``translations/en.json``
-    rather than literal strings inline (Q10 half-step).
+    rather than literal strings inline.
     """
     _LOGGER.exception("%s failed: %s", handler, ex)
     for exc_type, code, translation_key in _WS_ERROR_MAP:
@@ -343,24 +339,22 @@ def _get_store(
     AttributeError. Frontend call sites occasionally pass the parent
     ``meshcore`` integration's entry_id (rather than the chat
     companion's) — bringing that down the same code path was the source
-    of the Phase 1 dev-host runtime crash; ``getattr`` collapses the
-    miss to a clean None.
+    of a runtime crash; ``getattr`` collapses the miss to a clean None.
 
-    Behavior (Phase 5, Change 3 / forensics §F-D Fix D.1 hardening):
+    Behavior:
       - ``entry_id`` supplied and resolves to a chat-companion entry
         → return its store.
       - ``entry_id`` supplied but does NOT resolve to a chat-companion
-        entry → log WARNING and return None. Mirrors Phase 2's
+        entry → log WARNING and return None. Mirrors the
         ``_resolve_coordinator`` hardening for the parallel chat-
-        companion lookup path. Pre-Phase-5 this branch silently
-        returned None, masking wrong-shape entry_ids (the F-C
-        Category 4 latent class).
+        companion lookup path. This branch previously returned None
+        silently, masking wrong-shape entry_ids.
       - ``entry_id`` omitted (``None``) → fall back to first companion
         entry with a store. This is the legitimate path used by
         ``ws_mark_read`` / ``ws_get_messages_around`` and the three
-        Category-4 handlers (``ws_get_stored_messages``,
+        handlers (``ws_get_stored_messages``,
         ``ws_get_stored_message_count``, ``ws_search_stored_messages``)
-        whose Phase 5 documented-ignore conversion forces the
+        whose documented-ignore conversion forces the
         ``None``-fallback explicitly.
     """
     if entry_id is not None:
@@ -386,12 +380,12 @@ def _get_store(
 
 def async_register_ws_commands(hass: HomeAssistant) -> None:
     """Register all MeshCore Chat WebSocket commands."""
-    # Phase 1 commands
+    # Device / contact / channel read commands
     websocket_api.async_register_command(hass, ws_get_devices)
     websocket_api.async_register_command(hass, ws_get_contacts)
     websocket_api.async_register_command(hass, ws_get_channels)
 
-    # Phase 2 commands
+    # Device config and command-execution commands
     websocket_api.async_register_command(hass, ws_get_managed_devices)
     websocket_api.async_register_command(hass, ws_get_device_config)
     websocket_api.async_register_command(hass, ws_set_device_config)
@@ -400,12 +394,12 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_channel)
     websocket_api.async_register_command(hass, ws_remove_channel)
 
-    # Phase 3 commands
+    # Neighbor management commands
     websocket_api.async_register_command(hass, ws_get_neighbors)
     websocket_api.async_register_command(hass, ws_remove_neighbor)
     websocket_api.async_register_command(hass, ws_cleanup_stale_neighbors)
 
-    # Phase 4 commands
+    # Unread, identity, location, and contact commands
     websocket_api.async_register_command(hass, ws_get_unread_counts)
     websocket_api.async_register_command(hass, ws_mark_read)
     websocket_api.async_register_command(hass, ws_regenerate_identity)
@@ -492,12 +486,12 @@ async def ws_get_contacts(hass, connection, msg):
 def _compute_type_counts(contacts: list) -> dict:
     """Compute per-type counts for a list of contacts.
 
-    Inlined from upstream feature/sidebar-panel coordinator
-    (`_compute_type_counts` static method) — see Phase 4 deploy notes.
-    The companion-supporting `dev/combined` coordinator deliberately omits
-    `get_contacts_paginated` / `get_node_counts`, so the companion duplicates
-    the small amount of logic that operates on the public `get_all_contacts()`
-    payload. TODO(v0.2): refactor into a single `coordinator_facade` module.
+    Inlined from the upstream meshcore coordinator
+    (`_compute_type_counts` static method). The upstream coordinator this
+    companion consumes deliberately omits `get_contacts_paginated` /
+    `get_node_counts`, so the companion duplicates the small amount of
+    logic that operates on the public `get_all_contacts()` payload.
+    TODO: refactor into a single `coordinator_facade` module.
     """
     counts = {"clients": 0, "repeaters": 0, "room_servers": 0, "sensors": 0}
     for c in contacts:
@@ -740,7 +734,7 @@ def ws_get_channels(hass, connection, msg):
     connection.send_result(msg["id"], {"channels": channels})
 
 
-# ─── PHASE 2: meshcore/get_managed_devices ──────────────────────────────
+# ─── meshcore/get_managed_devices ───────────────────────────────────────
 # Returns tracked repeaters and clients with entity IDs
 
 
@@ -846,7 +840,7 @@ def ws_get_managed_devices(hass, connection, msg):
     )
 
 
-# ─── PHASE 2: meshcore/get_device_config ────────────────────────────────
+# ─── meshcore/get_device_config ─────────────────────────────────────────
 # Read companion device settings
 
 
@@ -910,7 +904,7 @@ def ws_get_device_config(hass, connection, msg):
     connection.send_result(msg["id"], config)
 
 
-# ─── PHASE 2: meshcore/set_device_config ────────────────────────────────
+# ─── meshcore/set_device_config ─────────────────────────────────────────
 # Write companion device settings
 
 
@@ -924,10 +918,9 @@ class RenameError(Exception):
     frontend gets the actual rejection reason instead of a generic
     "Operation failed" via ``_ws_send_error_safe``'s default mapping.
 
-    Phase 2 — proposal §"Phase 2 — alignment with Phase 1.1": Phase 1.1's
-    direct-SDK + ``EventType.ERROR``-check pattern is mirrored here on
-    the rename path so the same F10-class silent-success-on-firmware-error
-    issue cannot recur. Forensics: §F06 + §2b.
+    The direct-SDK + ``EventType.ERROR``-check pattern used by the
+    identity-change path is mirrored here on the rename path so the same
+    silent-success-on-firmware-error issue cannot recur.
     """
 
 
@@ -957,8 +950,6 @@ def _migrate_entity_ids_name_suffix(
     Idempotent on identical or empty suffixes (no mutations, returns
     empty list). Errors on individual entities are logged and
     swallowed — one bad entity should not abort the whole migration.
-
-    Forensics: §F06 + §2b.
     """
     if not old_suffix or not new_suffix or old_suffix == new_suffix:
         return []
@@ -1013,7 +1004,7 @@ async def ws_set_device_config(hass, connection, msg):
     changed = []
 
     try:
-        # Handle name setting (with entity_id migration — F06 fix per Phase 2).
+        # Handle name setting (with entity_id migration).
         if "name" in settings:
             new_name = settings["name"]
             old_name = coordinator.name or ""
@@ -1021,11 +1012,10 @@ async def ws_set_device_config(hass, connection, msg):
                 coordinator.config_entry.entry_id
             )
 
-            # Direct SDK call + EventType.ERROR check (mirrors Phase 1.1's
-            # `_do_identity_change` — proposal §"Phase 2 — alignment with
-            # Phase 1.1"). Avoids the F10-class silent-success-on-firmware-
-            # error path that would otherwise let a rejected rename look
-            # like a successful one to the user.
+            # Direct SDK call + EventType.ERROR check (mirrors the
+            # identity-change path's `_do_identity_change`). Avoids the
+            # silent-success-on-firmware-error path that would otherwise
+            # let a rejected rename look like a successful one to the user.
             #
             # The `EventType` import is lazy so SDK-level failures
             # (ConnectionError, TimeoutError, etc.) raised by `set_name`
@@ -1059,8 +1049,7 @@ async def ws_set_device_config(hass, connection, msg):
                 # issue → reload. Reverse order would silently no-op the
                 # migration: HA matches by unique_id during entity
                 # re-registration on reload, finds the OLD entity_id in
-                # the registry, and preserves it (proposal §2b "Order
-                # matters").
+                # the registry, and preserves it.
                 old_suffix = sanitize_name(old_name)
                 new_suffix = sanitize_name(new_name)
                 migrated_pairs = _migrate_entity_ids_name_suffix(
@@ -1082,9 +1071,9 @@ async def ws_set_device_config(hass, connection, msg):
                         for old_id, new_id in migrated_pairs
                     )
                     # Unique issue_id per rename event so each rename
-                    # becomes its own audit-trail entry. The earlier
-                    # design (Phase 2 v1/v2: issue_id keyed only on
-                    # entry_id) was idempotent on
+                    # becomes its own audit-trail entry. An earlier
+                    # design (issue_id keyed only on entry_id) was
+                    # idempotent on
                     # ``(domain, issue_id)`` — but HA's
                     # ``async_create_issue`` preserves the
                     # ``dismissed_version`` flag across overwrites,
@@ -1111,8 +1100,8 @@ async def ws_set_device_config(hass, connection, msg):
                             "old_name": old_name,
                             "new_name": new_name,
                             # Sanitized suffixes — what actually
-                            # appears in entity_ids. The earlier bug
-                            # (Phase 2 v1) used `_{old_name}` /
+                            # appears in entity_ids. An earlier bug
+                            # used `_{old_name}` /
                             # `_{new_name}` which rendered as
                             # `_MattDub` / `_Test Rename` instead of
                             # the real `_mattdub` / `_test_rename`.
@@ -1126,7 +1115,7 @@ async def ws_set_device_config(hass, connection, msg):
                 # reconstructs `coordinator.name` and `device_info` from
                 # the updated entry data.
                 #
-                # R3 outcome: meshcore-ha registers an
+                # meshcore-ha registers an
                 # `entry.add_update_listener(async_update_options)` at
                 # `__init__.py:473` that also calls `async_reload` on
                 # data changes. HA's per-entry `setup_lock` serializes
@@ -1145,7 +1134,7 @@ async def ws_set_device_config(hass, connection, msg):
                 # Settings → Repairs and would dwarf the dialog).
                 # Toast alone was too easy to miss for an op that
                 # rewrites 12+ entity_ids and triggers an integration
-                # reload (Phase 2 v4 user-feedback follow-up).
+                # reload.
                 connection.send_result(
                     msg["id"],
                     {
@@ -1206,7 +1195,7 @@ async def ws_set_device_config(hass, connection, msg):
         connection.send_result(msg["id"], {"success": True, "changed": changed})
     except RenameError as ex:
         # Surface the firmware-reported rejection text directly so the
-        # user sees the actual reason (mirrors Phase 1.1's `import_rejected`
+        # user sees the actual reason (mirrors the `import_rejected`
         # surface for `IdentityImportError`).
         connection.send_error(msg["id"], "rename_rejected", str(ex))
     except Exception as ex:
@@ -1237,7 +1226,7 @@ def _format_event_response(result) -> str:
     return str(payload)
 
 
-# ─── PHASE 2: meshcore/execute_local ────────────────────────────────────
+# ─── meshcore/execute_local ─────────────────────────────────────────────
 # Execute a Python library command on the companion
 
 
@@ -1299,7 +1288,7 @@ async def ws_execute_local(hass, connection, msg):
         )
 
 
-# ─── PHASE 2: meshcore/execute_remote ───────────────────────────────────
+# ─── meshcore/execute_remote ────────────────────────────────────────────
 # Execute a CLI command on a managed device with auto-login
 
 
@@ -1358,14 +1347,12 @@ async def ws_execute_remote(hass, connection, msg):
             )
             return
 
-        # Send login if password is available
+        # Send login if password is available. send_login_sync blocks
+        # until the node confirms login (LOGIN_SUCCESS) or the request
+        # times out, so the empirical sleep is no longer needed. The
+        # return value is intentionally not inspected here (see Phase 2).
         if password:
-            await coordinator.api.mesh_core.commands.send_login(contact, password)
-            # Wait a moment for login to be processed before issuing the
-            # command. The 0.5s is empirical, mirroring the upstream
-            # meshcore integration's services.py — replace with an event-
-            # driven wait when the SDK exposes a login-complete signal.
-            await asyncio.sleep(0.5)
+            await coordinator.api.mesh_core.commands.send_login_sync(contact, password)
 
         # Send the command
         cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
@@ -1390,7 +1377,7 @@ async def ws_execute_remote(hass, connection, msg):
         )
 
 
-# ─── PHASE 2: meshcore/set_channel ──────────────────────────────────────
+# ─── meshcore/set_channel ───────────────────────────────────────────────
 # Add or update a channel
 
 
@@ -1440,7 +1427,7 @@ async def ws_set_channel(hass, connection, msg):
 
         # Notify listeners (frontend subscribes to refresh its channel list).
         # Without this, a panel on another tab/client stays stale until its
-        # next manual reload.  F02 in the 2026-04 forensics report.
+        # next manual reload.
         hass.bus.async_fire(
             f"{MESHCORE_DOMAIN}_channels_updated",
             {"entry_id": coordinator.config_entry.entry_id, "channel_idx": channel_idx},
@@ -1456,7 +1443,7 @@ async def ws_set_channel(hass, connection, msg):
         )
 
 
-# ─── PHASE 2: meshcore/remove_channel ───────────────────────────────────
+# ─── meshcore/remove_channel ────────────────────────────────────────────
 # Clear a channel slot
 
 
@@ -1491,7 +1478,6 @@ async def ws_remove_channel(hass, connection, msg):
         coordinator.async_set_updated_data(coordinator.data)
 
         # Notify listeners (frontend subscribes to refresh its channel list).
-        # F02 in the 2026-04 forensics report.
         hass.bus.async_fire(
             f"{MESHCORE_DOMAIN}_channel_removed",
             {"entry_id": coordinator.config_entry.entry_id, "channel_idx": channel_idx},
@@ -1507,7 +1493,7 @@ async def ws_remove_channel(hass, connection, msg):
         )
 
 
-# ─── PHASE 3: meshcore/get_neighbors ────────────────────────────────────
+# ─── meshcore/get_neighbors ─────────────────────────────────────────────
 # Get neighbor data for a repeater
 
 
@@ -1618,10 +1604,12 @@ async def ws_remove_neighbor(hass, connection, msg):
             )
             return
 
-        # Send login if password is available
+        # Send login if password is available. send_login_sync blocks
+        # until the node confirms login (LOGIN_SUCCESS) or the request
+        # times out, so the empirical sleep is no longer needed. The
+        # return value is intentionally not inspected here (see Phase 2).
         if password:
-            await coordinator.api.mesh_core.commands.send_login(contact, password)
-            await asyncio.sleep(0.5)
+            await coordinator.api.mesh_core.commands.send_login_sync(contact, password)
 
         # Send neighbor.remove command to the repeater
         cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
@@ -1632,13 +1620,14 @@ async def ws_remove_neighbor(hass, connection, msg):
 
         # Remove neighbor entities and tracking from HA.
         #
-        # Inlined from upstream feature/sidebar-panel
+        # Inlined from the upstream meshcore integration's
         # `coordinator.remove_single_neighbor` — that method was deliberately
-        # removed from upstream main (commit 9211499) and is therefore absent
-        # from the companion-supporting `dev/combined`. The companion still
-        # exposes a remove-neighbor flow via meshcore_chat/remove_neighbor, so
-        # we duplicate the small entity-cleanup + persistence sequence here.
-        # TODO(v0.2): hoist into `coordinator_facade`.
+        # removed from upstream main in an earlier change and is therefore
+        # absent from the upstream coordinator this companion consumes. The
+        # companion still exposes a remove-neighbor flow via
+        # meshcore_chat/remove_neighbor, so we duplicate the small
+        # entity-cleanup + persistence sequence here.
+        # TODO: hoist into `coordinator_facade`.
         removed = 0
         try:
             from homeassistant.helpers import entity_registry as er
@@ -1740,7 +1729,7 @@ async def ws_cleanup_stale_neighbors(hass, connection, msg):
         )
 
 
-# ─── PHASE 4: Unread Tracking ────────────────────────────────────────────
+# ─── Unread Tracking ─────────────────────────────────────────────────────
 
 
 @websocket_api.websocket_command(
@@ -1753,25 +1742,23 @@ async def ws_cleanup_stale_neighbors(hass, connection, msg):
 async def ws_get_unread_counts(hass, connection, msg):
     """Return unread counts and last-read cursors, optionally scoped to one entry.
 
-    Phase 1 (proposal Change 4): the payload now includes a ``last_read``
-    map alongside ``unread`` so the panel can populate both badge counts
-    and per-conversation anchors in a single round-trip on connect.
-    Older clients that only read ``unread`` continue to work — the new
-    field is additive.
+    The payload includes a ``last_read`` map alongside ``unread`` so the
+    panel can populate both badge counts and per-conversation anchors in
+    a single round-trip on connect. Older clients that only read
+    ``unread`` continue to work — the field is additive.
 
-    Phase 4 (Multi-Entry Switching, F-B): when ``entry_id`` is supplied
-    and resolves to a known upstream coordinator (via Phase 2's tightened
-    ``_resolve_coordinator``), the returned maps are filtered to
-    entity_ids that belong to that coordinator (matched by the
-    ``.meshcore_<pubkey-prefix>_`` segment). Unknown ``entry_id`` triggers
-    Phase 2's warning + None and we return empty maps so the panel
-    surfaces a clean empty state instead of cross-contaminated counts
-    from other entries. Omitted ``entry_id`` returns the full
-    process-wide map (legacy / cross-entry rollup callers).
+    When ``entry_id`` is supplied and resolves to a known upstream
+    coordinator (via the tightened ``_resolve_coordinator``), the
+    returned maps are filtered to entity_ids that belong to that
+    coordinator (matched by the ``.meshcore_<pubkey-prefix>_`` segment).
+    Unknown ``entry_id`` triggers the resolver's warning + None and we
+    return empty maps so the panel surfaces a clean empty state instead
+    of cross-contaminated counts from other entries. Omitted ``entry_id``
+    returns the full process-wide map (legacy / cross-entry rollup
+    callers).
 
-    Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read
-    Gate Fix` (2026-05-08): the ``unread`` map is now derived from the
-    persistent cursor + the message store rather than read from a
+    The ``unread`` map is derived from the persistent cursor + the
+    message store rather than read from a
     separate in-memory counter. The wire shape
     (``{"unread": ..., "last_read": ...}``) is unchanged — entries
     with derived count > 0 are emitted, count == 0 is omitted, exactly
@@ -1804,7 +1791,7 @@ async def ws_get_unread_counts(hass, connection, msg):
     if entry_id is not None:
         coord = _resolve_coordinator(hass, entry_id)
         if coord is None:
-            # Phase 2 already logged the warning; respond with empty.
+            # The resolver already logged the warning; respond with empty.
             connection.send_result(msg["id"], {"unread": {}, "last_read": {}})
             return
         prefix = (getattr(coord, "pubkey", "") or "")[:6]
@@ -1812,8 +1799,7 @@ async def ws_get_unread_counts(hass, connection, msg):
             # Match the domain-boundary segment ".meshcore_<prefix>_"
             # against entity_ids of the form
             # "<domain>.meshcore_<prefix>_..._messages".
-            # NOTE: diverges from the proposal text which used
-            # "_meshcore_<prefix>_"; that pattern would never match
+            # NOTE: a "_meshcore_<prefix>_" pattern would never match
             # because the character preceding "meshcore" in real
             # entity_ids is the domain separator ".", not "_".
             needle = f".meshcore_{prefix}_"
@@ -1833,19 +1819,18 @@ async def ws_get_unread_counts(hass, connection, msg):
 async def ws_mark_read(hass, connection, msg):
     """Mark a conversation as read and snapshot the last-read cursor.
 
-    Phase 1 (proposal Change 3): in addition to clearing the in-memory
-    unread count, snapshot the newest stored message id at this moment
-    as the persistent read cursor. The cursor is what Phase 2's
-    ``get_messages_around`` endpoint anchors on.
+    In addition to clearing the in-memory unread count, snapshot the
+    newest stored message id at this moment as the persistent read
+    cursor. The cursor is what the ``get_messages_around`` endpoint
+    anchors on.
 
     ``get_messages(limit=1)`` returns ``messages[-1:]`` from the
-    chronologically-sorted store (Phase 0 made that ordering reliable
+    chronologically-sorted store (ordering is kept reliable
     via ``bisect.insort``). If the conversation has no stored messages
     yet (``recent`` empty), the cursor is left untouched — defensive
     no-op so the ``ack``-style success response still fires.
 
-    Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read
-    Gate Fix` (2026-05-08): the prior two-call sequence
+    The prior two-call sequence
     (``tracker.mark_read(entity_id)`` to clear the in-memory counter
     + ``tracker.set_last_read(entity_id, msg_id)`` to advance the
     cursor) collapses into a single ``mark_read(entity_id, msg_id)``
@@ -1880,18 +1865,17 @@ async def ws_mark_read(hass, connection, msg):
     connection.send_result(msg["id"], {"success": True})
 
 
-# ─── PHASE 4: Identity Management ────────────────────────────────────────
+# ─── Identity Management ─────────────────────────────────────────────────
 #
-# Phase 1.1 redesign (post-deploy 2026-05-03 forensics F09-F11). Phase 1
+# This identity-import flow was redesigned after the original approach
 # delegated to ``meshcore.execute_command`` and used the wrong key format
 # (``seed || verify_key`` instead of the SHA-512-expanded clamped secret
 # the firmware actually accepts), then silently swallowed firmware ERRORs
 # because the service-call path had no surface to detect them. The
 # ``return_response=True`` workaround tripped HA's framework validation
-# on OK-with-empty-payload responses. See the proposal §Phase 1 — Field
-# Issues Discovered for the full forensics.
+# on OK-with-empty-payload responses.
 #
-# Phase 1.1 abandons the service-delegation path and calls the SDK
+# The redesign abandons the service-delegation path and calls the SDK
 # directly:
 #
 # 1. ``coord.api.mesh_core.commands.import_private_key(seed_bytes)`` —
@@ -1905,7 +1889,7 @@ async def ws_mark_read(hass, connection, msg):
 # 3. ``coord.api.mesh_core.commands.reboot()`` — direct SDK call. The
 #    firmware only switches identities on next boot.
 # 4. Brief ``asyncio.sleep`` while transport-layer reconnect completes
-#    (SDK ``connection_manager`` handles the reconnect itself; see R1).
+#    (SDK ``connection_manager`` handles the reconnect itself).
 # 5. ``hass.config_entries.async_reload(meshcore_entry_id)`` — fires the
 #    pubkey-detection hook in upstream ``async_setup_entry``
 #    (meshcore-ha PR #169, ``__init__.py:319-348``), which calls
@@ -1914,7 +1898,7 @@ async def ws_mark_read(hass, connection, msg):
 # 6. Verify-after-reload guard: re-resolve the coordinator and confirm
 #    ``coord.pubkey != old_pubkey``. Belt-and-suspenders against any
 #    "OK + reload + same pubkey" edge case where the firmware accepted
-#    the import but failed to persist (R8).
+#    the import but failed to persist.
 #
 # Each step emits a streaming progress event so the panel modal can show
 # a step checklist instead of a single toast — terminal state still uses
@@ -1925,9 +1909,6 @@ async def ws_mark_read(hass, connection, msg):
 # seed into the firmware's 64-byte expanded clamped secret form (RFC
 # 8032 §5.1.5). Firmware-truth-derived; verified by scalar-mult parity
 # against the device's stored pubkey.
-#
-# Forensics: ``docs/Forensics - Identity Surfaces and Rename Device.md``
-# (F01-F05, F07-F08); proposal §Phase 1 — Field Issues Discovered (F09-F11).
 
 
 class IdentityImportError(Exception):
@@ -1938,7 +1919,7 @@ class IdentityImportError(Exception):
     the verify-after-reload mismatch. The WS handler surfaces this via
     ``connection.send_error(..., "import_rejected", str(ex))`` so the
     frontend modal can render the actual error text instead of a
-    generic "failed" toast (forensics F10).
+    generic "failed" toast.
     """
 
 
@@ -1951,7 +1932,7 @@ def _seed_to_meshcore_priv(seed: bytes) -> bytes:
     SHA-512(seed) with byte[0] cleared in the lowest 3 bits, byte[31]
     cleared in the top bit and set in bit 6 (RFC 8032 §5.1.5).
 
-    Verified live against firmware v1.14.1 (proposal §F09 evidence):
+    Verified live against firmware v1.14.1:
     scalar-mult of ``expanded[:32]`` by the Ed25519 base point yields
     the device's stored public key; ``expanded[0] & 7 == 0``;
     ``expanded[31]`` satisfies the clamping inequality.
@@ -1996,9 +1977,9 @@ async def _do_identity_change(
     from meshcore.events import EventType
 
     # Step 2 — import. Direct SDK call; inspect Event.type for ERROR
-    # (forensics F10/F11 — the service path silently swallowed firmware
-    # errors and the return_response=True workaround tripped HA's
-    # framework validation on empty-payload OK responses).
+    # (the service path silently swallowed firmware errors and the
+    # return_response=True workaround tripped HA's framework validation
+    # on empty-payload OK responses).
     connection.send_message(
         websocket_api.event_message(msg_id, {"step": "importing"})
     )
@@ -2014,7 +1995,7 @@ async def _do_identity_change(
     # post-call refresh, services.py:656-664). Wrapped in try/except: pass
     # because the reload re-fetches anyway and a self_info hiccup
     # shouldn't abort the chain. The call itself must be present
-    # (proposal R10 — covered by T1.11 unit assertion).
+    # (covered by a unit assertion).
     try:
         appstart = await coord.api.mesh_core.commands.send_appstart()
         coord.api._cache_self_info_event(appstart)
@@ -2030,8 +2011,7 @@ async def _do_identity_change(
 
     # Step 4 — wait for the device to come back. The SDK's
     # connection_manager handles transport-level reconnect; we just need
-    # to not race the reload. 3 seconds is a placeholder — see proposal
-    # Risk R1.
+    # to not race the reload. 3 seconds is a placeholder.
     # TODO: replace with EventType.CONNECTED await once the SDK exposes
     # a clean reconnect-completed signal.
     connection.send_message(
@@ -2046,7 +2026,7 @@ async def _do_identity_change(
     )
     await hass.config_entries.async_reload(meshcore_entry_id)
 
-    # Step 6 — verify the pubkey actually changed (proposal R8). The
+    # Step 6 — verify the pubkey actually changed. The
     # post-reload coordinator should reflect the new identity; if it
     # doesn't, the import didn't actually persist on the device and the
     # success path would be a lie.
@@ -2179,7 +2159,7 @@ async def ws_import_identity(hass, connection, msg):
         # raw Ed25519 seed and expanded into the firmware-native 64-byte
         # form; 64-byte input is passed through unchanged (already in
         # the firmware native format that ``export_private_key``
-        # returns). See proposal R4.
+        # returns).
         connection.send_message(
             websocket_api.event_message(msg["id"], {"step": "generating"})
         )
@@ -2205,7 +2185,7 @@ async def ws_import_identity(hass, connection, msg):
         )
 
 
-# ─── PHASE 4: Location Source ─────────────────────────────────────────────
+# ─── Location Source ──────────────────────────────────────────────────────
 
 
 @websocket_api.websocket_command(
@@ -2408,10 +2388,7 @@ def _trace_error_for(
     seen.
 
     Plumbs through the upstream service's optional ``reason`` field so
-    failures keep their diagnostic detail. See
-    ``docs/Proposed - Migrate meshcore-ha-chat to PR #216 services.md``
-    in the meshcore-ha workspace for the design rationale (Phase A
-    error-message preservation).
+    failures keep their diagnostic detail.
     """
     pubkey = msg.get("pubkey_prefix", "")
     reason = (result or {}).get("reason")
@@ -2455,7 +2432,7 @@ def _trace_error_for(
     if upstream_code == "path_discovery_timeout":
         # Upstream service does not return the timeout duration used,
         # so the message drops the "within Xs" suffix the pre-migration
-        # version included. Decision: option 3 in proposal.
+        # version included.
         return (
             "path_discovery_timeout",
             "No PATH_RESPONSE — the contact did not reply. Try again later.",
@@ -2818,8 +2795,7 @@ async def ws_get_stored_messages(
     handler, and that resolves to the parent ``meshcore`` integration's
     entry id rather than the chat companion's. The chat companion is
     single-instance per its config flow, so the fallback resolves
-    deterministically. See forensics §F-C Category 4 for the audit
-    that surfaced this latent shape mismatch.
+    deterministically.
     """
     # Always use the fallback — see the docstring for the rationale.
     store = _get_store(hass, None)
@@ -2866,7 +2842,7 @@ def ws_get_stored_message_count(
     panel's frontend forwards the parent ``meshcore`` integration's
     entry id, not the chat companion's. The chat companion is single-
     instance per its config flow, so the fallback resolves
-    deterministically. See forensics §F-C Category 4.
+    deterministically.
     """
     # Always use the fallback — see the docstring for the rationale.
     store = _get_store(hass, None)
@@ -2911,7 +2887,7 @@ async def ws_search_stored_messages(
     panel's frontend forwards the parent ``meshcore`` integration's
     entry id, not the chat companion's. The chat companion is single-
     instance per its config flow, so the fallback resolves
-    deterministically. See forensics §F-C Category 4.
+    deterministically.
     """
     # Always use the fallback — see the docstring for the rationale.
     store = _get_store(hass, None)
@@ -2979,8 +2955,7 @@ async def ws_get_messages_around(
 ) -> None:
     """Return a window of messages anchored on a message id.
 
-    Phase 2 of the last-read-anchor proposal (Change 5). The panel calls
-    this once per conversation open with the cursor that Phase 1's
+    The panel calls this once per conversation open with the cursor that
     ``ws_mark_read`` snapshotted, and gets back ``before_limit`` messages
     older than the anchor + ``after_limit`` messages newer than the
     anchor in a single round-trip. The anchor itself is included in the
@@ -2989,18 +2964,17 @@ async def ws_get_messages_around(
 
     Wire shape: ``{messages, anchor_index, has_more_before,
     has_more_after, anchor_found}``. ``anchor_found`` is ``False`` when
-    the anchor id is no longer present in the conversation (R3 in the
-    proposal: pruning, manual storage deletion, or future archive
-    feature could orphan the cursor); the panel falls back to a
+    the anchor id is no longer present in the conversation (pruning,
+    manual storage deletion, or future archive feature could orphan the
+    cursor); the panel falls back to a
     no-divider view that matches a fresh-install open.
 
     The inbound ``entry_id`` field is intentionally NOT forwarded to
     ``_get_store`` — it stays on the schema for backwards compatibility
     but the handler always uses the ``None``-fallback branch. Same
-    reason as ``ws_mark_read`` (Phase 1 hot-fix 18d7aea): the chat
-    panel's frontend forwards ``this.config?.entry_id`` to every WS
-    handler, and on the dev host that resolves to the parent
-    ``meshcore`` integration's entry id rather than the chat
+    reason as ``ws_mark_read``: the chat panel's frontend forwards
+    ``this.config?.entry_id`` to every WS handler, and that resolves to
+    the parent ``meshcore`` integration's entry id rather than the chat
     companion's. The chat companion is single-instance per its config
     flow, so the fallback resolves deterministically.
     """

@@ -3218,7 +3218,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
       overflow: hidden;
     }
 
-    /* Phase 4 (Change 8f): "↓ N new" indicator. Shown when new messages
+    /* "↓ N new" indicator. Shown when new messages
        arrived while scrolled away from the bottom OR when the buffer
        tail isn't yet the conversation's newest message. Click loads
        any unloaded newer messages, scrolls to bottom, and fires
@@ -3227,7 +3227,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
     .new-messages-indicator {
       position: sticky;
       bottom: 12px;
-      /* F05 fix: 'align-self: center' requires a flex parent (chat-
+      /* 'align-self: center' requires a flex parent (chat-
          container is 'display: block'); 'margin: 0 auto' requires a
          block-level element with finite width (button defaults to
          'inline-block'). Both were no-ops. Using left + transform
@@ -3252,7 +3252,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
     }
 
     .new-messages-indicator:active {
-      /* F05 fix: combine the centering transform with the press
+      /* Combine the centering transform with the press
          offset. A single 'transform' declaration replaces any prior
          one, so ':active' must restate both. */
       transform: translateX(-50%) translateY(1px);
@@ -6249,10 +6249,10 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
       <!-- Hidden Sensors Modal -->
       ${this._hiddenSensorsModalKey?this._renderHiddenSensorsModal():W}
 
-      <!-- Identity Flow Modal (Phase 1.1 streaming progress) -->
+      <!-- Identity Flow Modal (streaming progress) -->
       ${this._renderIdentityFlowModal()}
 
-      <!-- Rename Success Modal (Phase 2 v4 — persistent dialog) -->
+      <!-- Rename Success Modal (persistent dialog) -->
       ${this._renderRenameSuccessModal()}
 
       <!-- Status Toast -->
@@ -7446,7 +7446,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
       font-size: 13px;
     }
 
-    /* Session 54 — input phase */
+    /* Input phase */
 
     select, input[type="text"] {
       width: 100%;
@@ -7517,7 +7517,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
       border-radius: 4px;
     }
 
-    /* Session 56: picker-search now uses .form-input for sizing / padding
+    /* Picker-search uses .form-input for sizing / padding
        / border / border-radius (panel-wide form convention).  Local
        .picker-search only supplies picker-column-specific spacing. */
     .picker-search {
@@ -7639,7 +7639,7 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
       word-break: break-all;
     }
 
-    /* Session 56: Target row for both Select and Enter-path modes. */
+    /* Target row for both Select and Enter-path modes. */
     .target-row {
       display: flex;
       align-items: center;
@@ -8050,14 +8050,14 @@ function e(e,t,i,o){var r,s=arguments.length,a=s<3?t:null===o?o=Object.getOwnPro
         color: var(--secondary-text-color);
       }
 
-      /* Phase 3 (A.3): the multi-entry device switcher is a custom
-         dropdown (button + listbox) instead of a native <select>, so
-         each option can render name + pubkey-prefix as separate
-         visual lines and so the collapsed display does not duplicate
-         the prefix. The single-entry case shares the same wrap class
-         and same name+prefix sibling layout. Forensics F-A: node_name
-         and identity keys are independent fields by firmware design;
-         showing both makes the distinction visible to the user. */
+      /* The multi-entry device switcher is a custom dropdown (button +
+         listbox) instead of a native <select>, so each option can
+         render name + pubkey-prefix as separate visual lines and so the
+         collapsed display does not duplicate the prefix. The
+         single-entry case shares the same wrap class and same
+         name+prefix sibling layout. node_name and identity keys are
+         independent fields by firmware design; showing both makes the
+         distinction visible to the user. */
       .device-info-wrap {
         position: relative; /* anchor for the absolutely-positioned menu */
         display: inline-flex;

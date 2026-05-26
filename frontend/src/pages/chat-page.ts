@@ -23,7 +23,7 @@ export class ChatPage extends LitElement {
   @property({ type: String }) selectedId: string | null = null;
   @property({ type: Boolean }) narrow = false;
   /**
-   * Phase 2 (Unify Unread State): the panel-owned `UnreadController`.
+   * The panel-owned `UnreadController`.
    * chat-page `subscribe`s to it in `connectedCallback` and
    * unsubscribes — but does NOT destroy it — in
    * `disconnectedCallback` (the controller outlives chat-page, which
@@ -33,8 +33,8 @@ export class ChatPage extends LitElement {
    */
   @property({ attribute: false }) unread!: UnreadController;
   /**
-   * Phase 4 (Change 9): per-entity "last-read" message-ID cursor map.
-   * Phase 2: no longer parent-fed — mirrored from `unread.lastRead`
+   * Per-entity "last-read" message-ID cursor map.
+   * No longer parent-fed — mirrored from `unread.lastRead`
    * by the controller subscription (and an initial sync in
    * `connectedCallback`). Kept as a reactive property so the
    * late-arriving-`lastRead` re-anchor block in `updated()` still
@@ -42,8 +42,8 @@ export class ChatPage extends LitElement {
    * `_onConversationSelected` to drive anchor-based open via
    * `MessageStore.switchEntity(entityId, anchor)`, and by
    * `_renderItemsWithDivider` to position the divider AFTER the
-   * anchor message. (The read-progress machine that owns this moves
-   * into the controller in Phase 3.)
+   * anchor message. (The read-progress machine that owns this lives
+   * in the controller.)
    */
   @property({ type: Object }) lastRead: Record<string, string> = {};
 
@@ -65,9 +65,9 @@ export class ChatPage extends LitElement {
   private _scrollGuardUntil = 0;
   private _lastMessageCount = 0;
   /**
-   * Phase 3 (Unify Unread State): the per-conversation read-progress
-   * machine — the anchor, the R1 grace window, the deferred
-   * post-switch mark-read timer, the mark-read dedup guard, and the
+   * The per-conversation read-progress machine — the anchor, the grace
+   * window, the deferred post-switch mark-read timer, the mark-read
+   * dedup guard, and the
    * `markReadFired` lifecycle — moved into `UnreadController`'s
    * `ReadProgress`. chat-page now drives it through `beginConversation`
    * / `endConversation` / `onScrollState` / `onPillJump` /
@@ -396,7 +396,7 @@ export class ChatPage extends LitElement {
       overflow: hidden;
     }
 
-    /* Phase 4 (Change 8f): "↓ N new" indicator. Shown when new messages
+    /* "↓ N new" indicator. Shown when new messages
        arrived while scrolled away from the bottom OR when the buffer
        tail isn't yet the conversation's newest message. Click loads
        any unloaded newer messages, scrolls to bottom, and fires
@@ -405,7 +405,7 @@ export class ChatPage extends LitElement {
     .new-messages-indicator {
       position: sticky;
       bottom: 12px;
-      /* F05 fix: 'align-self: center' requires a flex parent (chat-
+      /* 'align-self: center' requires a flex parent (chat-
          container is 'display: block'); 'margin: 0 auto' requires a
          block-level element with finite width (button defaults to
          'inline-block'). Both were no-ops. Using left + transform
@@ -430,7 +430,7 @@ export class ChatPage extends LitElement {
     }
 
     .new-messages-indicator:active {
-      /* F05 fix: combine the centering transform with the press
+      /* Combine the centering transform with the press
          offset. A single 'transform' declaration replaces any prior
          one, so ':active' must restate both. */
       transform: translateX(-50%) translateY(1px);
@@ -448,14 +448,14 @@ export class ChatPage extends LitElement {
       this._messageStore = new MessageStore(this.config);
       this._messageStore.setOnChange(() => this.requestUpdate());
     }
-    // Phase 2: subscribe to the panel-owned UnreadController. Lit
+    // Subscribe to the panel-owned UnreadController. Lit
     // commits property bindings before `connectedCallback` runs (same
     // as `this.config` above), so `this.unread` is available here.
     // The controller OUTLIVES chat-page — we subscribe here and
     // unsubscribe (but do NOT destroy) in `disconnectedCallback`.
     if (this.unread && !this._unsubUnread) {
       this._unsubUnread = this.unread.subscribe(() => {
-        // Mirror `lastRead` so the Phase-3 late-arriving-anchor block
+        // Mirror `lastRead` so the late-arriving-anchor block
         // in `updated()` still sees `changedProperties.has('lastRead')`.
         // `ingestBackendData` rebuilds the controller's lastRead map
         // (fresh identity); `clearEntity` does not — so also force a
@@ -466,7 +466,7 @@ export class ChatPage extends LitElement {
       // The subscription only fires on FUTURE mutations — pull the
       // current cursor map in now so the first render is correct.
       this.lastRead = this.unread.lastRead;
-      // Phase 3: register the deferred post-switch re-check handler.
+      // Register the deferred post-switch re-check handler.
       // The controller owns the post-switch timer (in `ReadProgress`);
       // when it fires, it calls this handler, and chat-page —
       // owning the DOM facts — re-checks at-bottom via
@@ -489,14 +489,14 @@ export class ChatPage extends LitElement {
       this._messageStore.destroy();
       this._messageStore = null;
     }
-    // Phase 2: unsubscribe from the UnreadController — but do NOT
+    // Unsubscribe from the UnreadController — but do NOT
     // destroy it. It is panel-owned and outlives chat-page (chat-page
     // is remounted on every tab switch; the controller is not).
     if (this._unsubUnread) {
       this._unsubUnread();
       this._unsubUnread = null;
     }
-    // Phase 3: tear down the active conversation's read-progress state
+    // Tear down the active conversation's read-progress state
     // — this clears the controller's deferred post-switch timer so it
     // cannot fire against a torn-down chat-page. The controller itself
     // is NOT destroyed (it outlives chat-page).
@@ -514,7 +514,7 @@ export class ChatPage extends LitElement {
     }
     if (changedProperties.has('config') && this.config && this._messageStore) {
       this._messageStore.setConfig(this.config);
-      // Change 3.1: when the panel-header entry switch lands a new
+      // When the panel-header entry switch lands a new
       // config here (entry_id changed), reset chat-page's derived
       // selection state so the user lands on the empty-state
       // placeholder for the new entry until they explicitly pick a
@@ -544,7 +544,7 @@ export class ChatPage extends LitElement {
         this._conversationResolved = false;
         this._pendingScroll = null;
         this._lastMessageCount = 0;
-        // Phase 3: the anchor, the R1 grace window, the deferred
+        // The anchor, the grace window, the deferred
         // post-switch timer, the mark-read dedup guard, and the
         // markReadFired lifecycle all live in the controller now —
         // `endConversation` tears the active conversation's
@@ -571,8 +571,8 @@ export class ChatPage extends LitElement {
     // mirrors `lastRead` here, triggering this `updated()` pass),
     // retroactively capture the anchor and re-execute the scroll.
     //
-    // Phase 3 — collaboration, not absorption (proposal §"Verification
-    // pass" #6): chat-page keeps the gate it owns — a conversation is
+    // Collaboration, not absorption: chat-page keeps the gate it owns
+    // — a conversation is
     // selected and resolved, and no `_pendingScroll` is already queued
     // (avoids racing the legitimate first-render scroll). The
     // controller owns the half it can answer authoritatively (the
@@ -591,8 +591,8 @@ export class ChatPage extends LitElement {
         this._pendingScroll = 'last-read';
       }
     }
-    // Phase 2 / Change 3.1 extension: the auto-select-first-
-    // conversation branch was removed entirely. Every entry-point
+    // The auto-select-first-conversation branch was removed entirely.
+    // Every entry-point
     // into the chat tab — initial panel mount, switching from another
     // tab back to chat (chat-page is unmounted/remounted on tab
     // switch, so each visit starts fresh), and entry switches via
@@ -620,7 +620,7 @@ export class ChatPage extends LitElement {
       }
       // else: still loading — keep _pendingScroll for the next update cycle
     } else if (this._messageStore) {
-      // Phase 4: new messages arriving doesn't auto-mark-read anymore.
+      // New messages arriving doesn't auto-mark-read anymore.
       // _scrollToBottomIfNearEnd is gated on !hasNewerMessages and
       // user-was-at-bottom; it fires _checkAndMarkReadIfAtBottom itself
       // when it actually performs the scroll.
@@ -838,7 +838,7 @@ export class ChatPage extends LitElement {
     let messageIdx = 0;
     let dividerInserted = false;
 
-    // Phase 3: divider placement is a pure projection over the
+    // Divider placement is a pure projection over the
     // controller's read-progress state. `dividerAfterGroupIdx` owns
     // both the anchor-driven path — with the "outgoing never counts"
     // suppression and the cross-entry send-then-switch fix folded in
@@ -880,7 +880,7 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 4 (Change 8f): "↓ N new" indicator render.
+   * "↓ N new" indicator render.
    *
    * Visible when either (a) new realtime arrivals accumulated while the
    * user was scrolled away from the bottom, OR (b) the buffer tail
@@ -941,7 +941,7 @@ export class ChatPage extends LitElement {
     //   null       — nothing below the viewport (counter 0, no unloaded
     //                newer, last bubble visible) → suppress the pill.
     //
-    // Phase 4: the label semantics are centralized in the pure
+    // The label semantics are centralized in the pure
     // `pillLabel` helper, and the cursor-at-conversation-tail query is
     // the controller's `cursorAtTail` (reading the controller's
     // authoritative `_lastRead` map — the pill no longer consults
@@ -1009,18 +1009,18 @@ export class ChatPage extends LitElement {
         composed: true,
       }));
 
-      // Phase 4 (Change 8a): determine open behaviour.
+      // Determine open behaviour.
       //
       // Anchor-driven open: when we have a persisted last-read cursor
       // for this entity, hand it to the MessageStore so it routes
       // through `meshcore_chat/get_messages_around` instead of the
       // newest-50 path. The divider then renders AFTER the anchor in
-      // `_renderItemsWithDivider` (Change 8b), and `_doScrollWithRetry`
+      // `_renderItemsWithDivider`, and `_doScrollWithRetry`
       // scrolls the divider to viewport top — landing the user with
       // the previously-seen newest message at the top and the unread
       // band flowing down below it.
       //
-      // Fallback to the pre-Phase-4 unread-count divider when no
+      // Fallback to the unread-count divider when no
       // anchor is available (fresh install / never marked read on this
       // entity).
       const unreadCount = this._getUnreadCountForSelected();
@@ -1032,11 +1032,11 @@ export class ChatPage extends LitElement {
       this._pendingScroll = (anchor || unreadCount > 0) ? 'last-read' : 'bottom';
       this._lastMessageCount = 0; // Reset so auto-scroll doesn't trigger during initial load
 
-      // Phase 3: hand the read-progress machine to the controller.
+      // Hand the read-progress machine to the controller.
       // `beginConversation` captures the anchor from the controller's
       // own `lastRead` map, snapshots the unread count chat-page just
       // computed (the divider's count-based fallback needs it), arms
-      // the R1 grace window, and arms the deferred post-switch
+      // the grace window, and arms the deferred post-switch
       // re-check timer — cancelling any prior conversation's timer
       // first, so a quick conversation flip doesn't double-fire.
       //
@@ -1071,7 +1071,7 @@ export class ChatPage extends LitElement {
       }
 
       // Send via service.
-      // Phase 4.5 (forensics Fix 5): thread the selected entry's id
+      // Thread the selected entry's id
       // through so upstream `meshcore.send_*` routes to the right
       // coordinator. Without entry_id, the upstream service sends from
       // whichever coordinator is iterated first in `hass.data[meshcore]`.
@@ -1220,12 +1220,12 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 4 (Change 8e): auto-scroll-on-new-message.
+   * Auto-scroll-on-new-message.
    *
    * Gated on BOTH `!hasNewerMessages` AND user-was-at-bottom — we never
    * auto-jump to the bottom when there are unloaded newer messages
    * (the visual jump would skip past whatever the user was reading
-   * mid-buffer; see R2). When auto-scroll fires, we also call
+   * mid-buffer). When auto-scroll fires, we also call
    * `_checkAndMarkReadIfAtBottom` so the cursor advances naturally as
    * each new message arrives while the user is at the tail.
    */
@@ -1233,8 +1233,8 @@ export class ChatPage extends LitElement {
     // Don't auto-scroll while a conversation-switch scroll is in progress
     if (this._isScrollGuarded()) return;
     const store = this._messageStore;
-    // Phase 4 (Change 8e): skip auto-scroll when buffer tail isn't the
-    // conversation's newest. R2 mitigation.
+    // Skip auto-scroll when buffer tail isn't the
+    // conversation's newest.
     if (store?.hasNewerMessages) return;
     this.updateComplete.then(() => {
       requestAnimationFrame(() => {
@@ -1252,7 +1252,7 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 4 (Change 8d): unified scroll handler.
+   * Unified scroll handler.
    *
    * Three responsibilities on every scroll event:
    *   (i) Lazy-load older messages near top (within
@@ -1265,7 +1265,7 @@ export class ChatPage extends LitElement {
    *   (iii) Viewport-based mark-read: when near bottom AND
    *       `!hasNewerMessages` (the user has the chronologically
    *       newest message in view), call
-   *       `_checkAndMarkReadIfAtBottom`. The R1 grace period
+   *       `_checkAndMarkReadIfAtBottom`. The grace period
    *       suppresses the FIRST auto-mark-read after each conversation
    *       switch.
    *
@@ -1285,8 +1285,8 @@ export class ChatPage extends LitElement {
     const atBottom = distFromBottom < AT_BOTTOM_THRESHOLD_PX;
 
     // (iii) prerequisite — keep the store's at-bottom flag synchronized
-    // with the viewport on every event. The store's R5c logic (counter
-    // reset on transition to at-bottom while caught up) and the
+    // with the viewport on every event. The store's counter logic
+    // (counter reset on transition to at-bottom while caught up) and the
     // realtime path (decide whether to tick the indicator counter or
     // fire mark-read) both depend on this flag being current.
     store.setUserAtBottom(atBottom);
@@ -1343,17 +1343,16 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 4 fix (Bug #2): geometric "last message visible" check.
+   * Geometric "last message visible" check.
    *
-   * Replaces the pre-fix pixel-distance check
+   * Replaces an earlier pixel-distance check
    * (`distFromBottom < AT_BOTTOM_THRESHOLD_PX = 150`) inside the
    * mark-read trigger. 150 px is roughly 1-2 message-bubble heights,
    * so the user could be that far above the actual newest message
-   * and still trigger mark-read prematurely (visible in 2026-05-04
-   * Phase 4 manual test, video 2 — 15-unread case marked read with
-   * the latest message still off-screen).
+   * and still trigger mark-read prematurely (a many-unread conversation
+   * could be marked read with the latest message still off-screen).
    *
-   * The intent of the proposal's §"Mark-read semantics" was "user has
+   * The intended mark-read semantics are "user has
    * the chronologically newest message visible." This helper checks
    * exactly that by comparing the last `meshcore-message-bubble`'s
    * bottom edge against the chat container's bottom edge. 5 px slack
@@ -1408,13 +1407,13 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 3: viewport-based mark-read trigger — chat-page's side.
+   * Viewport-based mark-read trigger — chat-page's side.
    *
    * chat-page owns the DOM facts; it gathers them here
    * (`_isLastMessageVisible`, the MessageStore's `hasNewerMessages`,
    * the non-temp buffer tail id) and feeds them into the controller's
    * `onScrollState`. The controller owns the gates: entity match, the
-   * R1 grace window, the `hasNewerMessages` defensive gate, the
+   * grace window, the `hasNewerMessages` defensive gate, the
    * last-message-visible gate, and the buffer-tail dedup.
    *
    * Called from the scroll handler (`_onChatScroll`), the auto-scroll
@@ -1436,7 +1435,7 @@ export class ChatPage extends LitElement {
   }
 
   /**
-   * Phase 4 (Change 8f): "↓ N new" indicator click handler.
+   * "↓ N new" indicator click handler.
    *
    * Loads any unloaded newer messages (50 at a time) until the
    * MessageStore reports `hasNewerMessages === false`, then scrolls
@@ -1459,7 +1458,7 @@ export class ChatPage extends LitElement {
       if (!container) return;
       container.scrollTop = container.scrollHeight;
       if (!this._currentEntityId) return;
-      // `onPillJump` bypasses the R1 grace window — the user
+      // `onPillJump` bypasses the grace window — the user
       // explicitly clicked the indicator to jump to current, so
       // they're definitionally at the conversation tail (the loop
       // above drained `hasNewerMessages` and we just scrolled to the
@@ -1475,9 +1474,9 @@ export class ChatPage extends LitElement {
 
   private _getUnreadCountForSelected(): number {
     if (!this.selectedId || !this.unread) return 0;
-    // Phase 2: unified badge projection. `badgeCount` folds in the
+    // Unified badge projection. `badgeCount` folds in the
     // former direct-`_currentEntityId`-key fast path plus the shared
-    // node_prefix-scoped pattern fallback (Phase 4 F-B: channel
+    // node_prefix-scoped pattern fallback (channel
     // matches require the node_prefix to avoid cross-entry
     // contamination on same-numbered channels; null node_prefix →
     // suffix-only match). One implementation now backs both this and

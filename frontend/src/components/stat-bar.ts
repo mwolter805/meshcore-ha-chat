@@ -9,7 +9,7 @@ import type { Band } from '../utils/sensor-thresholds';
  * `(value - min) / (max - min)` clamped to [0, 100]. Width transitions
  * via CSS so updating values animates smoothly.
  *
- * Tick marks are deliberately not supported (Q6 resolved against ticks).
+ * Tick marks are deliberately not supported.
  * Tooltip text is owned by the parent label's `<meshcore-info-tip>`,
  * not by the bar itself.
  *

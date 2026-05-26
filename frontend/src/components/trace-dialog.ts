@@ -9,13 +9,13 @@ import { attachDialogA11y } from '../utils/dialog-a11y';
 /**
  * Modal dialog for tracing a contact.
  *
- * Session 54: the dialog now has three phases:
+ * The dialog has three phases:
  *   - input:    user selects path type (discovery / select repeaters /
  *               enter path) and, for non-discovery modes, supplies the
  *               outbound hop sequence.  Emits `trace-requested` on Run.
  *   - running:  brief "Tracing…" state while the WS call is in flight.
  *   - done:     renders success (RTT / hops / final SNR / per-hop SNRs)
- *               or error, matching the pre-Session-54 layout.
+ *               or error.
  *
  * The panel owns `traceContact()` invocation; this component just emits
  * `trace-requested` with `{ pathMode, path }` and waits for the panel to
@@ -32,18 +32,18 @@ export class TraceDialog extends LitElement {
   @property({ type: String }) error = '';
   @property({ type: Array }) availableRepeaters: Contact[] = [];
   /**
-   * Session 55: the target the dialog was opened against.  Passed through
+   * The target the dialog was opened against.  Passed through
    * from the panel so the dialog can pre-populate a forwarding-class
    * target as the last hop in Select mode (see willUpdate).  Null for
    * ManagedDevice invocations or when we have no target record.
    */
   @property({ type: Object }) targetContact: Contact | null = null;
 
-  // Session 54 input-phase state
+  // Input-phase state
   @state() private pathMode: TracePathMode = 'discovery';
   @state() private pathHops: Contact[] = [];
   @state() private enteredPath = '';
-  // Session 55: free-text filter for the Select Repeaters Available column.
+  // Free-text filter for the Select Repeaters Available column.
   @state() private _repeaterFilter = '';
 
   /**
@@ -56,7 +56,7 @@ export class TraceDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog.
+    // Focus trap + Escape closes the dialog.
     attachDialogA11y(this, {
       isOpen: () => this.open,
       onEscape: () => this._close(),
@@ -166,7 +166,7 @@ export class TraceDialog extends LitElement {
       font-size: 13px;
     }
 
-    /* Session 54 — input phase */
+    /* Input phase */
 
     select, input[type="text"] {
       width: 100%;
@@ -237,7 +237,7 @@ export class TraceDialog extends LitElement {
       border-radius: 4px;
     }
 
-    /* Session 56: picker-search now uses .form-input for sizing / padding
+    /* Picker-search uses .form-input for sizing / padding
        / border / border-radius (panel-wide form convention).  Local
        .picker-search only supplies picker-column-specific spacing. */
     .picker-search {
@@ -359,7 +359,7 @@ export class TraceDialog extends LitElement {
       word-break: break-all;
     }
 
-    /* Session 56: Target row for both Select and Enter-path modes. */
+    /* Target row for both Select and Enter-path modes. */
     .target-row {
       display: flex;
       align-items: center;
@@ -395,7 +395,7 @@ export class TraceDialog extends LitElement {
    */
   willUpdate(changed: Map<string, unknown>) {
     if (changed.has('open') && this.open && !changed.get('open')) {
-      // Fresh-open reset.  Session 55: if the target is a forwarding-class
+      // Fresh-open reset.  If the target is a forwarding-class
       // node (repeater=2, room-server=3, sensor=4), pre-populate it as the
       // single last-hop entry and switch to 'select' mode so the user sees
       // the intent "trace to this node" reflected immediately.  Clients
@@ -409,7 +409,7 @@ export class TraceDialog extends LitElement {
         !!target && (target.type === 2 || target.type === 3 || target.type === 4);
       if (isForwardingClass) {
         this.pathMode = 'select';
-        // Session 56: pathHops is intermediate hops only; the target
+        // pathHops is intermediate hops only; the target
         // sits in its own Target row driven by this.targetContact.
         // If the device has a cached outbound route for this contact,
         // resolve each hop hash against availableRepeaters and pre-
@@ -434,7 +434,7 @@ export class TraceDialog extends LitElement {
   }
 
   /**
-   * Session 55 addendum: resolve a contact's cached out_path hex string
+   * Resolve a contact's cached out_path hex string
    * into an ordered list of Contact objects from availableRepeaters.
    * Returns null when mapping is ambiguous or unresolvable; the caller
    * then falls back to [target] alone.
@@ -542,7 +542,7 @@ export class TraceDialog extends LitElement {
 
   private _renderRepeaterPicker() {
     const selectedSet = new Set(this.pathHops.map(r => r.public_key));
-    // Session 55: two-axis filter — case-insensitive substring match against
+    // Two-axis filter — case-insensitive substring match against
     // adv_name OR hex-prefix match against pubkey_prefix.  Prefix-match
     // accepts raw hex the user is typing (1-char, 2-char, etc.).
     const filter = this._repeaterFilter.trim().toLowerCase();
@@ -723,7 +723,7 @@ export class TraceDialog extends LitElement {
   // --- validation / derivation ---------------------------------------
 
   private _isValidExplicitHops(): boolean {
-    // Session 56: Enter-path input is now outbound hops only.  Empty
+    // Enter-path input is outbound hops only.  Empty
     // input is valid — it means a direct-neighbor target-only trace,
     // assembled by _buildPathString as just the target byte.
     const s = this.enteredPath.trim();
@@ -749,18 +749,18 @@ export class TraceDialog extends LitElement {
 
   private _buildPathString(): string {
     if (this.pathMode === 'select') {
-      // Session 55 Addendum 2: 2 hex chars = 1 byte per hop.
+      // 2 hex chars = 1 byte per hop.
       // send_trace() derives flags=0 from this length (meshcore_py
       // messaging.py:253-254), matching MeshCoreOne's wire format.
       //
-      // Empirical finding (Session 55 Addendum 2): 2-byte hashes
+      // Empirical finding: 2-byte hashes
       // (flags=1) do NOT complete TRACE round-trip in production
       // meshes — the target node's retransmit either doesn't happen
       // or isn't heard on the return leg.  1-byte hashes (flags=0)
       // do complete.  Root cause in firmware not identified; switch
       // decided based on MeshCoreOne-matches-works, 2-byte-fails.
       //
-      // Round-trip path construction (Addendum 1).  TRACE protocol
+      // Round-trip path construction.  TRACE protocol
       // (Mesh.cpp:41-66) fires onTraceRecv only on nodes where
       // (path_len << path_sz) >= len.  For the sender to be that
       // node, the hash list must end back at the sender's radio
@@ -769,7 +769,7 @@ export class TraceDialog extends LitElement {
       // so repeated hashes don't trigger hasSeen dedup at mirror
       // hops.
       //
-      // Session 56: pathHops holds intermediate hops only; target
+      // pathHops holds intermediate hops only; target
       // is pulled from this.targetContact separately.  Empty
       // pathHops → single target byte (direct-neighbor trace).
       if (!this.targetContact) return '';
@@ -779,7 +779,7 @@ export class TraceDialog extends LitElement {
       return [...hopHexes, targetHex, ...[...hopHexes].reverse()].join(',');
     }
     if (this.pathMode === 'explicit') {
-      // Session 56: user enters outbound hops only; build round-trip
+      // User enters outbound hops only; build round-trip
       // here (outbound + target + reverse(outbound)).  Matches
       // Select mode semantics.  Empty input → direct-neighbor
       // target-only trace.

@@ -1,13 +1,12 @@
 """Per-conversation persistent message store for MeshCore Chat.
 
-Lifted from upstream `meshcore` coordinator (feature/message-store branch)
-and decoupled — this class owns its own state and storage, and has no
+Lifted from the upstream `meshcore` coordinator and decoupled — this
+class owns its own state and storage, and has no
 reference to a coordinator. The companion integration owns one instance
 per config entry and stores it under
 ``hass.data["meshcore_chat"][entry_id]["store"]``.
 
-Adaptations from the upstream version (per Proposed - meshcore-ha-chat
-Standalone HACS Integration.md, Change 5):
+Adaptations from the upstream version:
 
 1. No coordinator coupling — `_loaded_conversations` and friends are
    instance attributes here, not borrowed from a coordinator.
@@ -17,8 +16,8 @@ Standalone HACS Integration.md, Change 5):
    ``ConfigEntry.options`` with constants from ``const.py`` as defaults.
 4. The store is agnostic about message *contents* — it accepts whatever
    dict the listeners produce. Missing fields like ``hop_count`` and
-   ``snr`` (currently absent on incoming-DM events upstream until PR-A
-   lands) are simply not present in the stored record. No code change
+   ``snr`` (currently absent on incoming-DM events upstream) are simply
+   not present in the stored record. No code change
    needed when those fields start arriving.
 """
 from __future__ import annotations
@@ -61,8 +60,8 @@ def _backfill_messages(messages: list[dict]) -> bool:
     Three backfills:
 
     1. Enrich rx_log entries with ``path_nodes``/``hop_count`` derived
-       from ``path``/``path_len``. Companion-supporting dev/combined
-       upstream emits the raw fields but not the convenience aliases the
+       from ``path``/``path_len``. The upstream coordinator this companion
+       consumes emits the raw fields but not the convenience aliases the
        frontend reads — so existing records show "0 hops" until enriched.
 
     2. Promote stuck outgoing messages from ``delivery_status="pending"``
@@ -240,7 +239,7 @@ class MessageStore:
         # a delayed mesh event arrives after a more recent message has
         # already been stored. Cost: O(log n) lookup + O(n) shift; n is
         # bounded by ``max_per_conv`` (default 1000), so total cost is
-        # sub-millisecond. ``last_read`` cursor logic (Phases 1+) and
+        # sub-millisecond. The ``last_read`` cursor logic and
         # ``get_messages(limit=N)`` semantics depend on ``messages[-1]``
         # being the chronologically newest message, not the most-recently
         # inserted one.
@@ -368,14 +367,14 @@ class MessageStore:
     ) -> tuple[list[dict], int, bool, bool, bool]:
         """Return a window of messages anchored on ``anchor_id``.
 
-        Phase 2 of the last-read-anchor proposal. Used by the panel on
-        conversation open to load a narrow band around the persisted
+        Used by the panel on conversation open to load a narrow band
+        around the persisted
         last-read cursor in a single round-trip — typically 25 older +
         50 newer messages — instead of paging up from the newest 50 to
         find the unread divider.
 
         The window is computed against the chronologically-sorted store
-        list (Phase 0 made that ordering reliable via ``bisect.insort``).
+        list (ordering is kept reliable via ``bisect.insort``).
         Slice semantics:
 
         - ``start = max(0, anchor_idx - before_limit + 1)`` — anchor
@@ -387,7 +386,7 @@ class MessageStore:
           frontend whether to enable the lazy-load triggers in either
           direction.
 
-        Anchor-not-found path (R3 in the proposal): pruning, manual
+        Anchor-not-found path: pruning, manual
         deletion of ``.storage/meshcore_chat.<entity>.json``, or a future
         archive feature could orphan the cursor. We fall back to the
         newest ``(before_limit + after_limit)`` messages with
@@ -434,8 +433,7 @@ class MessageStore:
     ) -> int:
         """Count inbound messages chronologically newer than ``cursor_id``.
 
-        Used by the cursor-derived unread-badge path (proposal `Cursor-
-        Derived Unread Count and Mark-Read Gate Fix`, Phase 1). Replaces
+        Used by the cursor-derived unread-badge path. Replaces
         the in-memory ``UnreadTracker._unread`` counter — derives the
         unread count on demand from the persistent cursor + the
         chronologically-sorted store, eliminating the desync class

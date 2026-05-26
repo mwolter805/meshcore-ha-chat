@@ -94,6 +94,28 @@ def test_backfill_enriches_rx_log_path_nodes_and_hop_count() -> None:
     assert rx["hop_count"] == 4
 
 
+def test_backfill_uses_path_hash_size_when_present() -> None:
+    """rx_log path with explicit path_hash_size splits at that width."""
+    msg = {
+        "id": "m1a",
+        "rx_log_data": [{"path": "b00b0e57867d", "path_len": 3, "path_hash_size": 2}],
+    }
+    assert _backfill_messages([msg]) is True
+    assert msg["rx_log_data"][0]["path_nodes"] == ["b00b", "0e57", "867d"]
+
+
+def test_backfill_derives_two_byte_width_without_path_hash_size() -> None:
+    """Without path_hash_size, width is derived from len(path)/path_len."""
+    msg = {
+        "id": "m1b",
+        "rx_log_data": [{"path": "b00b0e57867d", "path_len": 3}],
+    }
+    assert _backfill_messages([msg]) is True
+    rx = msg["rx_log_data"][0]
+    assert rx["path_nodes"] == ["b00b", "0e57", "867d"]
+    assert rx["hop_count"] == 3
+
+
 def test_backfill_promotes_stuck_pending_with_rx_log_data() -> None:
     """Outgoing pending message with rx_log_data is promoted to sent."""
     msg = {

@@ -3,6 +3,7 @@ name: Validate
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   schedule:
     - cron: "0 0 * * *"
@@ -17,7 +18,7 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run hassfest
         # Pinned to 2026-04-07 HEAD on home-assistant/actions/master.
@@ -31,7 +32,7 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run HACS validation
         # Pinned to 2026-01-26 HEAD on hacs/action/main.

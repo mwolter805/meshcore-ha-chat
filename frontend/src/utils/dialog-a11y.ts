@@ -1,9 +1,8 @@
 /**
  * Dialog accessibility helper — focus trap + Escape-to-close.
  *
- * Phase 5 of the HA Quality + Best Practices Remediation (Q13). The
- * same pattern is needed by every modal dialog in `frontend/src/`, so
- * it is implemented once and adopted via a one-line constructor call.
+ * The same pattern is needed by every modal dialog in `frontend/src/`,
+ * so it is implemented once and adopted via a one-line constructor call.
  *
  * Usage (component-class dialog):
  *

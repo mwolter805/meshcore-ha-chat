@@ -24,7 +24,7 @@ export class ConfirmDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog (treated as cancel).
+    // Focus trap + Escape closes the dialog (treated as cancel).
     attachDialogA11y(this, {
       isOpen: () => this.open,
       onEscape: () => this._onCancel(),

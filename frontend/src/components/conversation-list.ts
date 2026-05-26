@@ -11,12 +11,12 @@ export class ConversationList extends LitElement {
   @property({ type: Array }) conversations: Array<Contact | Channel> = [];
   @property({ type: String }) activeId: string | null = null;
   /**
-   * Phase 2 (Unify Unread State): the panel-owned `UnreadController`.
-   * `_getUnreadCount` reads the badge value from `unread.badgeCount`.
+   * The panel-owned `UnreadController`. `_getUnreadCount` reads the
+   * badge value from `unread.badgeCount`.
    */
   @property({ attribute: false }) unread!: UnreadController;
   /**
-   * Phase 2: still bound (`.unreadCounts=${unread.counts}` from
+   * Still bound (`.unreadCounts=${unread.counts}` from
    * chat-page) — its fresh identity on every controller mutation is
    * what re-renders this component. The badge VALUE, however, now
    * comes from the controller via `_getUnreadCount`.
@@ -282,7 +282,7 @@ export class ConversationList extends LitElement {
   }
 
   /**
-   * Phase 5 Q13: arrow-key navigation between conversation rows. Each
+   * Arrow-key navigation between conversation rows. Each
    * row is a focusable role="option" (see _renderConversation); arrow
    * keys move focus, Enter/Space selects, Home/End jump to ends.
    */
@@ -402,10 +402,10 @@ export class ConversationList extends LitElement {
   }
 
   private _getUnreadCount(id: string): number {
-    // Phase 2: unified badge projection. `UnreadController.badgeCount`
+    // Unified badge projection. `UnreadController.badgeCount`
     // is the single implementation backing this and
     // `chat-page._getUnreadCountForSelected`. It owns the entity-id
-    // suffix matching, the Phase-4 (F-B) node_prefix scoping for
+    // suffix matching, the node_prefix scoping for
     // channels (so same-named channels on different upstream entries
     // don't cross-contaminate), and the suffix-only fallback when
     // nodePrefix is null. The `unread` prop is always supplied by

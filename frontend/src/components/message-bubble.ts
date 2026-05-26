@@ -26,7 +26,7 @@ export class MessageBubble extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the message-action sheet.
+    // Focus trap + Escape closes the message-action sheet.
     attachDialogA11y(this, {
       isOpen: () => this._selectedMessage !== null,
       onEscape: () => { this._selectedMessage = null; },

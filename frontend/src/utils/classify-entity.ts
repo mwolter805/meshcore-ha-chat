@@ -14,13 +14,12 @@
 // produced false-positive Temperature tiles for any peer whose advertised
 // name contained that 4-letter sequence.
 //
-// `metricKey` is an optional tag that the node-summary card (see
-// docs/Proposed - Sensor Aggregation Card.md) uses to look up threshold
-// bands via evaluateSensor(). Branches whose value is informational-only
-// (TX power, raw airtime seconds, voltage, temperature) intentionally
-// leave metricKey unset — Q3 of the proposal locks the bar-colour driver
-// to battery_percentage rather than voltage, and the threshold table
-// names tx_power / sf / bw / frequency as informational-only.
+// `metricKey` is an optional tag that the node-summary card uses to look
+// up threshold bands via evaluateSensor(). Branches whose value is
+// informational-only (TX power, raw airtime seconds, voltage,
+// temperature) intentionally leave metricKey unset — the bar-colour
+// driver is battery_percentage rather than voltage, and tx_power / sf /
+// bw / frequency are treated as informational-only.
 
 import type { MetricKey } from './sensor-thresholds';
 
@@ -102,7 +101,7 @@ export function classifyEntity(entity: any): EntityInfo | null {
   }
   if (dc === 'voltage' || eid.includes('battery_voltage')
       || eid.includes('_voltage') || eid.includes('cv_voltage')) {
-    // Q3: voltage is informational only. No metricKey — chemistry varies
+    // Voltage is informational only. No metricKey — chemistry varies
     // per board and the integration doesn't expose chemistry per node.
     return { entity_id: eid, label: 'Voltage', icon: 'power',
              colorScheme: 'neutral', sortOrder: 2 };

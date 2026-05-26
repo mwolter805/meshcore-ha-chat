@@ -1,22 +1,19 @@
 """Unread message tracking for MeshCore Chat.
 
-Originally lifted verbatim (logic-wise) from upstream `feature/sidebar-
-panel: unread_tracking.py`. The bus event name is kept on the upstream
+The unread-tracking logic originated in earlier development and has since
+been consolidated here. The bus event name is kept on the upstream
 `meshcore_*` namespace so the panel can subscribe to the same event
 whether it's running against the upstream integration or the companion.
 The tracker instance itself lives in the companion's domain bucket:
 ``hass.data["meshcore_chat"]["unread_tracker"]``.
 
-Phase 1 (proposal `Last-Read Anchor and Read-Receipt Refinement for
-Chat Panel`) layered a persistent ``_last_read: dict[entity_id ->
-message_id]`` map on top of the in-memory unread counts. Persistence
-uses HA's ``Store`` helper via the ``meshcore_chat.last_read.<entry_id>``
-key, with a 2-second debounced save that coalesces rapid cursor
-advances.
+A persistent ``_last_read: dict[entity_id -> message_id]`` map is
+layered on top of the in-memory unread counts. Persistence uses HA's
+``Store`` helper via the ``meshcore_chat.last_read.<entry_id>`` key,
+with a 2-second debounced save that coalesces rapid cursor advances.
 
-Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read Gate
-Fix` (2026-05-08) removed the in-memory ``_unread`` counter entirely.
-Unread counts are now derived on demand from the persistent cursor +
+The in-memory ``_unread`` counter was later removed entirely. Unread
+counts are now derived on demand from the persistent cursor +
 the chronologically-sorted ``MessageStore`` (see
 ``MessageStore.count_unread_after``). This eliminates the desync class
 where the in-memory counter reset on HA restart while the persistent
@@ -25,7 +22,7 @@ channels by the number of inbound messages received between the most
 recent ``mark_read`` and the most recent reset. The tracker now owns
 exactly one piece of state: the persistent cursor map. ``clear()`` is
 a no-op kept for callsite compatibility (cursors are intentionally
-preserved across config-entry reloads — locked decision 2026-05-04).
+preserved across config-entry reloads).
 """
 from __future__ import annotations
 
@@ -39,7 +36,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Bus event fired whenever a conversation's unread count changes. Kept on
 # the `meshcore_*` namespace so existing frontend listeners written for
-# upstream's sidebar-panel work unchanged.
+# the upstream integration work unchanged.
 EVENT_UNREAD_UPDATED = "meshcore_unread_updated"
 
 # Storage key for the persistent last-read cursor map. ``{entry_id}`` is
@@ -54,7 +51,7 @@ STORAGE_KEY_LAST_READ = "meshcore_chat.last_read.{entry_id}"
 # advances (e.g. user scrolling through a fast-moving channel) into a
 # single disk write. Worst-case loss on HA shutdown is bounded by this
 # value; ``async_unload_entry`` calls ``_flush()`` to drain the pending
-# write (R6 mitigation in the Phase 1 proposal).
+# write.
 LAST_READ_SAVE_DEBOUNCE_MS = 2000
 
 
@@ -68,8 +65,7 @@ class UnreadTracker:
       durable record of what the user has actually seen, used by
       ``get_messages_around`` to anchor the viewport on conversation
       open and by ``MessageStore.count_unread_after`` to derive the
-      unread badge count on demand (Phase 1 of proposal `Cursor-
-      Derived Unread Count and Mark-Read Gate Fix`).
+      unread badge count on demand.
 
     Unread *counts* used to live here as an in-memory ``_unread`` dict;
     that field was removed in 2026-05-08 because in-memory state could
@@ -101,7 +97,7 @@ class UnreadTracker:
 
         Called once during ``async_setup_entry``. Returns the empty dict
         for fresh installs (``Store.async_load()`` returns None for
-        missing storage files — covers R5).
+        missing storage files).
         """
         stored = await self._store.async_load()
         # Defensive: legacy or partial files might not be a dict; the
@@ -131,8 +127,7 @@ class UnreadTracker:
         immediately reflects the cleared badge without waiting for the
         next ``ws_get_unread_counts`` round-trip.
 
-        Phase 1 of proposal `Cursor-Derived Unread Count and Mark-Read
-        Gate Fix` (2026-05-08): this method replaces the previous
+        This method replaces the previous
         ``mark_read(entity_id)`` + ``set_last_read(entity_id, msg_id)``
         pair. The cursor advance and the event fire are now
         unconditional (apart from the no-message no-op) — there is no
@@ -179,7 +174,7 @@ class UnreadTracker:
 
         Safe to call multiple times. Called on debounce-fire (the timer
         callback creates the task) and from ``async_unload_entry`` to
-        drain the pending write before HA shuts down (R6 mitigation).
+        drain the pending write before HA shuts down.
         """
         if self._save_timer is not None:
             self._save_timer.cancel()
@@ -189,13 +184,12 @@ class UnreadTracker:
     def clear(self) -> None:
         """No-op (kept for callsite compatibility).
 
-        Pre-2026-05-08 this cleared the in-memory ``_unread`` counter.
+        Previously this cleared the in-memory ``_unread`` counter.
         That counter is gone — unread counts are now derived from the
         persistent cursor + the message store, so there is no transient
         in-memory state to reset on config-entry unload. ``_last_read``
-        is intentionally NOT cleared (locked decision 2026-05-04,
-        Change 1 in the original Phase 1 proposal): a config-entry
-        reload should not wipe the user's read positions. Cursors
+        is intentionally NOT cleared: a config-entry reload should not
+        wipe the user's read positions. Cursors
         survive across reload cycles via ``async_load`` rehydrating
         from disk.
 

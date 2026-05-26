@@ -2,10 +2,10 @@ import type { RenderItem } from '../types';
 import { MARK_READ_GRACE_PERIOD_MS } from '../constants';
 
 /**
- * Backend payload shape for `meshcore_chat/get_unread_counts`. Phase 1
- * of the Cursor-Derived proposal extended the response from a bare
- * `unread` map to `{ unread, last_read }`; `getUnreadAndLastRead` in
- * `api.ts` returns exactly this shape.
+ * Backend payload shape for `meshcore_chat/get_unread_counts`. The
+ * response was extended from a bare `unread` map to
+ * `{ unread, last_read }`; `getUnreadAndLastRead` in `api.ts` returns
+ * exactly this shape.
  */
 export interface UnreadBackendData {
   unread: Record<string, number>;
@@ -13,7 +13,7 @@ export interface UnreadBackendData {
 }
 
 /**
- * Per-active-conversation read-progress state (Phase 3). One instance
+ * Per-active-conversation read-progress state. One instance
  * lives at a time on the controller (`_readProgress`) — created by
  * `beginConversation`, torn down by `endConversation`. Consolidates the
  * scattered chat-page fields the read-progress machine used to be:
@@ -44,8 +44,8 @@ export interface ReadProgress {
   /**
    * Timestamp at which the post-switch grace period ends. The first
    * auto-mark-read after the switch is suppressed until
-   * `Date.now() >= graceUntil` (R1 mitigation — gives the user a
-   * chance to scroll up before the cursor advances).
+   * `Date.now() >= graceUntil` (grace-window mitigation — gives the
+   * user a chance to scroll up before the cursor advances).
    */
   graceUntil: number;
   /**
@@ -79,15 +79,15 @@ export interface ReadProgress {
  * UnreadController — the single panel-owned source of truth for the
  * frontend's "unread" state.
  *
- * Phase 2 surface: the backend-data side and the badge projection —
- * `subscribe` / `onMarkReadRequested` plumbing, the `ingestBackendData`
+ * Backend-data surface: the backend-data side and the badge projection
+ * — `subscribe` / `onMarkReadRequested` plumbing, the `ingestBackendData`
  * / `clearEntity` mutators, the `counts` / `lastRead` getters, and the
- * `badgeCount` projection that unifies the two pre-refactor badge-
- * lookup implementations (`conversation-list._getUnreadCount` and
+ * `badgeCount` projection that unifies the two badge-lookup
+ * implementations (`conversation-list._getUnreadCount` and
  * `chat-page._getUnreadCountForSelected`).
  *
- * Phase 3 surface: the per-conversation read-progress machine — the
- * `ReadProgress` state, the `beginConversation` / `endConversation`
+ * Read-progress surface: the per-conversation read-progress machine —
+ * the `ReadProgress` state, the `beginConversation` / `endConversation`
  * lifecycle, `maybeReanchorOnLateData`, the `onScrollState` /
  * `onPillJump` mark-read mutators, the `onPostSwitchTimerFire`
  * registration + the deferred post-switch timer, and the
@@ -96,12 +96,11 @@ export interface ReadProgress {
  * results in; the controller owns the gates (grace window, dedup,
  * `hasNewerMessages`) and the cursor mutation.
  *
- * Phase 4 surface: the pill's data needs — the `cursorAtTail` query
+ * Pill surface: the pill's data needs — the `cursorAtTail` query
  * and the pure `pillLabel` helper (an exported free function below the
  * class). The pill (`_renderNewMessagesIndicator`) stays in chat-page
  * (it depends on chat-page render state + a DOM probe); it only
- * *consults* the controller. See
- * `docs/Proposed - Unify Unread State (Frontend).md`.
+ * *consults* the controller.
  *
  * Lifetime: constructed once by `meshcore-chat-panel.ts` and owned by
  * the panel. The panel is not remounted on tab switch, so the badge
@@ -134,14 +133,13 @@ export class UnreadController {
 
   /**
    * Handler the panel registers to own the mark-read WS round-trip +
-   * unread bookkeeping. Phase 2 wires the registration plumbing; the
-   * emitter (the read-progress mutators that call `requestMarkRead`)
-   * lands in Phase 3, so in Phase 2 this is registered-but-unfired.
+   * unread bookkeeping. The emitter is the read-progress mutators that
+   * call `requestMarkRead`.
    */
   private _markReadRequestedHandler: ((entityId: string) => void) | null = null;
 
   /**
-   * Per-active-conversation read-progress state (Phase 3). Null when no
+   * Per-active-conversation read-progress state. Null when no
    * conversation is open (initial mount, between conversations after
    * `endConversation`). Created by `beginConversation`.
    */
@@ -153,7 +151,7 @@ export class UnreadController {
    * (`ReadProgress.postSwitchTimer`); when it fires the controller
    * invokes this handler, and chat-page — which owns the DOM facts —
    * gathers them and calls back into `onScrollState`. Same registration
-   * shape as Phase 2's `onMarkReadRequested` / `requestMarkRead`.
+   * shape as `onMarkReadRequested` / `requestMarkRead`.
    */
   private _postSwitchTimerHandler: (() => void) | null = null;
 
@@ -181,7 +179,7 @@ export class UnreadController {
   /**
    * Register chat-page's deferred post-switch re-check handler. The
    * controller's post-switch timer (armed in `beginConversation`)
-   * invokes this when the R1 grace window elapses; chat-page's handler
+   * invokes this when the grace window elapses; chat-page's handler
    * gathers the current DOM facts and calls `onScrollState`. Only one
    * handler is supported — chat-page is the sole consumer and
    * re-registers on every remount.
@@ -192,8 +190,7 @@ export class UnreadController {
 
   /**
    * Emit a mark-read request to the panel-registered handler. The
-   * Phase 3 read-progress mutators call this; in Phase 2 it exists
-   * only to complete the registration plumbing (no caller yet).
+   * read-progress mutators call this.
    */
   requestMarkRead(entityId: string): void {
     if (entityId && this._markReadRequestedHandler) {
@@ -278,22 +275,20 @@ export class UnreadController {
     return this._lastRead;
   }
 
-  // ---- per-conversation read-progress lifecycle (Phase 3) ---------------
+  // ---- per-conversation read-progress lifecycle ------------------------
 
   /**
    * Begin tracking read-progress for a freshly-opened conversation.
    * Called by chat-page's `_onConversationSelected`. Captures the
    * anchor from the current `lastRead` map, snapshots the unread count
-   * chat-page already computed, arms the R1 grace window, and arms the
+   * chat-page already computed, arms the grace window, and arms the
    * one-shot deferred post-switch re-check timer.
    *
    * The unread count is passed in rather than derived here: the
    * controller would need chat-page's `selectedId` / `nodePrefix` /
    * resolved entity_id to call `badgeCount`, and chat-page already has
-   * all three. (Interpretation call — the proposal's API sketch shows
-   * `beginConversation(entityId)`, but `ReadProgress` needs the count
-   * for the divider's count-based fallback and the controller cannot
-   * derive it; same kind of sketch-vs-prose gap as Phase 2's three.)
+   * all three. `ReadProgress` needs the count for the divider's
+   * count-based fallback and the controller cannot derive it on its own.
    *
    * Tears down any prior conversation's timer first, so a quick
    * conversation flip cancels the in-flight deferred re-check.
@@ -352,8 +347,8 @@ export class UnreadController {
    * window, the timers, the dedup guard all stay). chat-page calls
    * this when the user re-selects the conversation they're already in
    * — "clear the stale count-based divider and scroll to bottom".
-   * Faithfully preserves the pre-Phase-3 `_unreadCountAtSelection = 0`
-   * re-select handler (which likewise left the anchor untouched).
+   * Preserves the earlier `_unreadCountAtSelection = 0`
+   * re-select behaviour (which likewise left the anchor untouched).
    */
   resetUnreadCountAtSelection(): void {
     if (this._readProgress) {
@@ -366,7 +361,7 @@ export class UnreadController {
    * cursor arrives AFTER conversation selection (the fresh-panel-load /
    * entry-switch-immediate-click race). Returns true if it re-anchored.
    *
-   * Collaboration, not absorption (proposal §"Verification pass" #6):
+   * Collaboration, not absorption:
    * chat-page keeps the `_conversationResolved` / `_pendingScroll`
    * gate — that's chat-page render state the controller does not own —
    * and only calls this when those are satisfied. The controller owns
@@ -386,13 +381,13 @@ export class UnreadController {
     return true;
   }
 
-  // ---- mark-read mutators (Phase 3) -------------------------------------
+  // ---- mark-read mutators ----------------------------------------------
 
   /**
    * Viewport-driven mark-read trigger. chat-page calls this from its
    * scroll handler / auto-scroll path / the deferred post-switch
    * re-check, passing in the DOM-derived facts. The controller owns
-   * the gates: entity match, R1 grace window, `hasNewerMessages`,
+   * the gates: entity match, grace window, `hasNewerMessages`,
    * last-message-visible, and the buffer-tail dedup.
    *
    * Returns true if a mark-read was emitted — chat-page resets the
@@ -418,7 +413,7 @@ export class UnreadController {
    * drains `hasNewerMessages` and scrolls to the buffer bottom before
    * calling this, so the user is at the conversation tail by
    * construction — the `lastMessageVisible` / `hasNewerMessages` gates
-   * are satisfied, and the R1 grace window is bypassed (the click is
+   * are satisfied, and the grace window is bypassed (the click is
    * an explicit "I want to be caught up"). Returns true if a mark-read
    * was emitted.
    */
@@ -467,7 +462,7 @@ export class UnreadController {
    *   channel (e.g. "1"), or a hex pubkey prefix for a contact.
    * @param nodePrefix  The entry's 6-char pubkey prefix, used to scope
    *   channel matches so same-named channels on different upstream
-   *   entries don't cross-contaminate (Phase 4 F-B). `null` on
+   *   entries don't cross-contaminate. `null` on
    *   single-entry installs / before config arrives → suffix-only
    *   match, as before.
    * @param directKey  Optional resolved entity_id for a direct-key
@@ -529,18 +524,17 @@ export class UnreadController {
    * outgoing groups does two things at once:
    *
    *   - "outgoing never counts" — mirrors the backend's
-   *     `count_unread_after` (`message_store.py:432`, counts only
+   *     `count_unread_after` (in `message_store.py`, counts only
    *     `not outgoing`); this subsumes the old anchor-is-last-group
-   *     suppression check (Phase 1).
-   *   - the cross-entry send-then-switch fix
-   *     (`meshcore-ha-chat_issue_log.md` 2026-05-14): when the user
+   *     suppression check.
+   *   - the cross-entry send-then-switch fix: when the user
    *     sent a message then navigated away before the cursor advanced,
    *     the anchor sits before their own sent message. Walking PAST
    *     the leading outgoing run lands the divider above the first
    *     genuine inbound message, not above the user's own send — a
    *     "mark read up to my own just-sent message, but no further"
    *     rule expressed purely as a projection (no cursor mutation, no
-   *     `onMessageSent` mutator — proposal §"Verification pass" #1).
+   *     `onMessageSent` mutator).
    *
    * If no inbound group exists past the anchor, the divider is
    * suppressed entirely.
@@ -597,7 +591,7 @@ export class UnreadController {
   }
 
   /**
-   * Pill projection (Phase 4): is the backend last-read cursor already
+   * Pill projection: is the backend last-read cursor already
    * at the buffer tail? "At tail" means the persisted cursor for
    * `entityId` equals `bufferTailId` — the newest non-temp message id
    * chat-page passes in (`_latestNonTempMessageId()`).
@@ -628,7 +622,7 @@ export class UnreadController {
 
 /**
  * Pure label-selection helper for the "↓ N new" / "↓ unread" /
- * "↓ latest" jump-to-current pill (Phase 4). Centralizes the label
+ * "↓ latest" jump-to-current pill. Centralizes the label
  * semantics that used to be inlined in chat-page's
  * `_renderNewMessagesIndicator`. A free function, not a method: it
  * touches no controller state — every input is a chat-page-gathered
@@ -641,8 +635,7 @@ export class UnreadController {
  *   - cursorAtTail:    `UnreadController.cursorAtTail(entityId, bufferTailId)`
  *
  * Returns the label string, or `null` when the pill should be
- * suppressed. Semantics preserved verbatim from the pre-Phase-4 inline
- * logic:
+ * suppressed. Semantics:
  *   - counter > 0                          → "↓ {counter} new"
  *   - counter 0, !hasNewer, !hasContentBelow → null (nothing below the
  *                                             viewport — suppress)

@@ -32,7 +32,7 @@ export class ChannelDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape cancels (treated as close).
+    // Focus trap + Escape cancels (treated as close).
     attachDialogA11y(this, {
       isOpen: () => this.open,
       onEscape: () => this._onCancel(),

@@ -26,12 +26,12 @@ interface ConfirmAction {
 }
 
 /**
- * State for the streaming-progress identity-change modal (Phase 1.1).
+ * State for the streaming-progress identity-change modal.
  *
  * The Regenerate / Import flow takes ~5-10s end-to-end (host-side seed
  * generate + clamp, SDK ``import_private_key``, device reboot, transport
- * reconnect, config-entry reload, post-reload pubkey verify). The
- * single-toast UX from Phase 1 was insufficient for an irreversible
+ * reconnect, config-entry reload, post-reload pubkey verify). A
+ * single-toast UX is insufficient for an irreversible
  * change of this duration; this state machine drives a step checklist
  * during the flow and a terminal panel afterward (success or failure).
  */
@@ -116,11 +116,11 @@ export class SettingsPage extends LitElement {
   // Key management modal
   @state() private _keyManagementModalOpen = false;
 
-  // Phase 1.1 — streaming identity-change flow (Regenerate / Import).
+  // Streaming identity-change flow (Regenerate / Import).
   @state() private _identityFlowState: IdentityFlowState = { kind: 'closed' };
   private _identityFlowUnsubscribe: (() => void) | null = null;
 
-  // Phase 2 v4 — post-rename persistent dialog. Toast was too easy to
+  // Post-rename persistent dialog. Toast was too easy to
   // miss for an op that rewrites N entity_ids and triggers a
   // config-entry reload. When set, the panel renders a modal the user
   // must explicitly close; on close, we refresh device config so the
@@ -136,7 +136,7 @@ export class SettingsPage extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes inline modals.
+    // Focus trap + Escape closes inline modals.
     attachDialogA11y(this, {
       isOpen: () => this._contextMenu !== null,
       onEscape: () => this._closeContextMenu(),
@@ -173,7 +173,7 @@ export class SettingsPage extends LitElement {
       },
       getScope: () => this.shadowRoot?.querySelector('[data-a11y="identity-flow"]'),
     });
-    // Phase 2 v4 — rename success modal: focus-trap, Escape closes
+    // Rename success modal: focus-trap, Escape closes
     // and triggers the same refresh path as the Close button.
     attachDialogA11y(this, {
       isOpen: () => this._renameSuccess !== null,
@@ -874,10 +874,10 @@ export class SettingsPage extends LitElement {
       <!-- Hidden Sensors Modal -->
       ${this._hiddenSensorsModalKey ? this._renderHiddenSensorsModal() : nothing}
 
-      <!-- Identity Flow Modal (Phase 1.1 streaming progress) -->
+      <!-- Identity Flow Modal (streaming progress) -->
       ${this._renderIdentityFlowModal()}
 
-      <!-- Rename Success Modal (Phase 2 v4 — persistent dialog) -->
+      <!-- Rename Success Modal (persistent dialog) -->
       ${this._renderRenameSuccessModal()}
 
       <!-- Status Toast -->
@@ -1364,7 +1364,7 @@ export class SettingsPage extends LitElement {
         this._editValues = { ...this._editValues };
 
         if (result.rename) {
-          // Phase 2 v4: rename triggers a persistent post-rename dialog
+          // Rename triggers a persistent post-rename dialog
           // with old/new names + suffix + count. Toast is too easy to
           // miss for an op that rewrites N entity_ids and reloads the
           // integration. The Close handler refreshes _deviceConfig so
@@ -1406,7 +1406,7 @@ export class SettingsPage extends LitElement {
     const newName = this._editValues['name'];
     const oldName = this._deviceConfig?.name;
     if (newName === undefined || newName === oldName) return;
-    // Phase 2 (F06): the dialog now describes what the migration
+    // The dialog describes what the migration
     // actually does. Server-side `_migrate_entity_ids_name_suffix` in
     // ws_api.py rewrites entity_ids ending in `_<sanitized-old>` to end
     // in `_<sanitized-new>`. The local `sanitize` mirror approximates
@@ -1524,8 +1524,8 @@ export class SettingsPage extends LitElement {
       onConfirm: async () => {
         if (!this.hass) return;
         // Close the Key Management modal so the progress modal isn't
-        // stacked on top of a stale UI (Phase 1.1 §Change 13 — confirm
-        // dialog already closes via _onConfirmAction).
+        // stacked on top of a stale UI (the confirm dialog already
+        // closes via _onConfirmAction).
         this._closeKeyManagementModal();
         this._startIdentityFlow('regenerate', {
           type: 'meshcore_chat/regenerate_identity',
@@ -1975,7 +1975,7 @@ export class SettingsPage extends LitElement {
     }
   }
 
-  // Session 56: Trace button on the Companion quick-actions row.  Rather
+  // Trace button on the Companion quick-actions row.  Rather
   // than reach into the contact list (which lives on meshcore-chat-panel),
   // the page dispatches an event upward.  The panel opens the target-
   // picker dialog, and on selection routes through the same trace-

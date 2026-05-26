@@ -56,45 +56,43 @@ export const FETCH_MAX_RETRIES = 5;
 /**
  * Lazy loading scroll threshold — pixels from top to trigger loadOlderMessages.
  *
- * Pre-Phase-3 tunable consumed by `chat-page.ts._onChatScroll`. Phase 3
- * adds the `LAZY_LOAD_TRIGGER_PX` / `AT_BOTTOM_THRESHOLD_PX` pair below
- * which Phase 4 will switch chat-page over to. Kept here unchanged so the
- * pre-Phase-4 path keeps working while Phase 3 is purely additive.
+ * Legacy tunable consumed by `chat-page.ts._onChatScroll`. The
+ * `LAZY_LOAD_TRIGGER_PX` / `AT_BOTTOM_THRESHOLD_PX` pair below
+ * supersedes it for the rewritten scroll handler. Kept here unchanged
+ * so the older scroll path keeps working alongside the newer one.
  */
 export const LAZY_LOAD_SCROLL_THRESHOLD = 200;
 
-// ─── Phase 3: last-read anchor + bidirectional lazy load tunables ──────
+// ─── Last-read anchor + bidirectional lazy load tunables ───────────────
 //
-// Extracted from magic-number style per `Proposed - Last-Read Anchor and
-// Read-Receipt Refinement for Chat Panel.md` §Changes "Change 7" / §Phase
-// Handoffs Phase 3 deliverables. Phase 4 wires the data-layer plumbing
-// added in Phase 3 into chat-page.ts; these constants give that wiring a
-// single place to tune. Phase 4 will add `MARK_READ_GRACE_PERIOD_MS = 1000`
-// (R1 mitigation) on top of these three.
+// Extracted from magic-number style so the data-layer plumbing in
+// chat-page.ts has a single place to tune. The
+// `MARK_READ_GRACE_PERIOD_MS` constant below sits on top of these three
+// as the mark-read grace-window mitigation.
 
 /**
- * Lazy-load trigger distance (Phase 3+).
+ * Lazy-load trigger distance.
  *
  * Distance in pixels from either edge of the chat container at which
  * `loadOlderMessages()` (near the top) or `loadNewerMessages()` (near the
- * bottom) should fire. Phase 4's rewritten `_onChatScroll` consumes this
+ * bottom) should fire. The rewritten `_onChatScroll` consumes this
  * for both directions.
  */
 export const LAZY_LOAD_TRIGGER_PX = 150;
 
 /**
- * At-bottom threshold (Phase 3+).
+ * At-bottom threshold.
  *
  * Distance in pixels from the bottom of the chat container that counts as
  * "the user has the newest visible message in view." Combined with
  * `MessageStore.hasNewerMessages === false`, this is the trigger for
- * viewport-based mark-read in Phase 4. Used by `setUserAtBottom()` in
- * Phase 4's `_onChatScroll` rewrite.
+ * viewport-based mark-read. Used by `setUserAtBottom()` in the
+ * `_onChatScroll` rewrite.
  */
 export const AT_BOTTOM_THRESHOLD_PX = 150;
 
 /**
- * Last-read save debounce (Phase 1 + Phase 3+).
+ * Last-read save debounce.
  *
  * Rapid mark-read events coalesce into a single `Store.async_save` after
  * this many milliseconds of quiescence on the backend (`UnreadTracker.
@@ -105,10 +103,9 @@ export const AT_BOTTOM_THRESHOLD_PX = 150;
 export const LAST_READ_SAVE_DEBOUNCE_MS = 2000;
 
 /**
- * Mark-read grace period after a conversation switch (Phase 4).
+ * Mark-read grace period after a conversation switch.
  *
- * R1 mitigation per `Proposed - Last-Read Anchor and Read-Receipt
- * Refinement for Chat Panel.md` §"Risks". The new viewport-based
+ * Mitigation for premature cursor advance. The viewport-based
  * mark-read trigger fires whenever scroll is near-bottom AND
  * `hasNewerMessages === false`. For low-unread conversations the
  * post-anchor scroll lands the user near the bottom immediately —
@@ -116,7 +113,7 @@ export const LAST_READ_SAVE_DEBOUNCE_MS = 2000;
  * conversation opens, even if the user immediately scrolls UP without
  * reading.
  *
- * As of the Unify Unread State Phase 3 refactor this constant is
+ * As of the unified-unread-state refactor this constant is
  * consumed by `UnreadController` (not chat-page): `beginConversation`
  * stamps `ReadProgress.graceUntil = Date.now() + this` and arms a
  * one-shot deferred post-switch timer of this duration. The FIRST

@@ -23,7 +23,7 @@ export class ManageDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog. The host
+    // Focus trap + Escape closes the dialog. The host
     // always renders an open dialog (no `open` flag — chat-page
     // conditionally mounts/unmounts), so isOpen is constant true.
     attachDialogA11y(this, {

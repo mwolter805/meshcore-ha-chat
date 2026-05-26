@@ -78,7 +78,7 @@ export class DevicesPage extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes inline modals. One
+    // Focus trap + Escape closes inline modals. One
     // controller per modal-state pair. getScope targets a unique
     // wrapper class (added below) so the focus trap is scoped to the
     // open modal, not the whole page.

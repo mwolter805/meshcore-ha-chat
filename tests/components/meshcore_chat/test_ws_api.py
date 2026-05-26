@@ -1161,6 +1161,78 @@ async def test_ws_execute_remote_error_no_coordinator(
     assert conn.errors[0][1] == "not_found"
 
 
+async def test_ws_execute_remote_password_branch_uses_send_login_sync(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Password-bearing repeater → send_login_sync is awaited, send_login is not, command is sent.
+
+    Documents the Phase 1 deprecation fix (send_login → send_login_sync).
+    The send_login_sync mock returns None — the legacy "proceed regardless"
+    behavior must be preserved on that path.
+    """
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(return_value=None)
+    coordinator.api.mesh_core.commands.send_login = AsyncMock()
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="ok")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_execute_remote,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "command": "ver"},
+    )
+
+    coordinator.api.mesh_core.commands.send_login_sync.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "secret"
+    )
+    coordinator.api.mesh_core.commands.send_login.assert_not_called()
+    coordinator.api.mesh_core.commands.send_cmd.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "ver"
+    )
+    assert not conn.errors
+    assert conn.results[0][1]["success"] is True
+
+
+async def test_ws_execute_remote_send_login_sync_raise_aborts_command(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync raises (e.g. suggested_timeout KeyError) → command is NOT sent.
+
+    Documents the one Phase 1 case that does not preserve old fire-and-forget
+    behavior: the handler's try/except turns the raise into a surfaced error
+    via _ws_send_error_safe, and the command is skipped.
+    """
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(
+        side_effect=KeyError("suggested_timeout")
+    )
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock()
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_execute_remote,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "command": "ver"},
+    )
+
+    coordinator.api.mesh_core.commands.send_login_sync.assert_awaited_once()
+    coordinator.api.mesh_core.commands.send_cmd.assert_not_called()
+    assert conn.errors, "expected error surfaced via _ws_send_error_safe"
+    assert not conn.results
+
+
 # ─── ws_set_channel / ws_remove_channel (DESTRUCTIVE) ───────────────────
 
 
@@ -1295,6 +1367,68 @@ async def test_ws_remove_neighbor_error_no_coordinator(
         {"id": 1, "target_prefix": "x", "neighbor_pubkey": "y"},
     )
     assert conn.errors[0][1] == "not_found"
+
+
+async def test_ws_remove_neighbor_password_branch_uses_send_login_sync(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Password-bearing repeater → send_login_sync is awaited, send_login is not, neighbor.remove is sent."""
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(return_value=None)
+    coordinator.api.mesh_core.commands.send_login = AsyncMock()
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="ok")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_remove_neighbor,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "neighbor_pubkey": "n0deadbeef"},
+    )
+
+    coordinator.api.mesh_core.commands.send_login_sync.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "secret"
+    )
+    coordinator.api.mesh_core.commands.send_login.assert_not_called()
+    coordinator.api.mesh_core.commands.send_cmd.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "neighbor.remove n0deadbeef"
+    )
+    assert not conn.errors
+    assert conn.results[0][1]["success"] is True
+
+
+async def test_ws_remove_neighbor_send_login_sync_raise_aborts_command(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync raises → neighbor.remove is NOT sent and an error is surfaced."""
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(
+        side_effect=KeyError("suggested_timeout")
+    )
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock()
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_remove_neighbor,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "neighbor_pubkey": "n0deadbeef"},
+    )
+
+    coordinator.api.mesh_core.commands.send_login_sync.assert_awaited_once()
+    coordinator.api.mesh_core.commands.send_cmd.assert_not_called()
+    assert conn.errors, "expected error surfaced via _ws_send_error_safe"
+    assert not conn.results
 
 
 async def test_ws_cleanup_stale_neighbors_happy(

@@ -31,8 +31,8 @@ export class MeshCorePanel extends LitElement {
   @state() private _error: string | null = null;
   @state() private _unsubscribeList: Array<() => void> = [];
   /**
-   * Phase 2 (Unify Unread State): the single panel-owned source of
-   * truth for frontend "unread" state. Replaces the former
+   * The single panel-owned source of truth for frontend "unread"
+   * state. Replaces the former
    * `@state() _unreadCounts` / `@state() _lastRead` maps. Constructed
    * once and owned by the panel — the panel is not remounted on tab
    * switch, so the badge map and the `meshcore_unread_updated`
@@ -49,7 +49,7 @@ export class MeshCorePanel extends LitElement {
   /** Entity ID of the conversation currently being viewed in chat. */
   private _activeChatEntityId: string | null = null;
 
-  // Phase 3 (A.3) — custom dropdown for the multi-entry device switcher.
+  // Custom dropdown for the multi-entry device switcher.
   // Replaces the native <select> so each option can render name + pubkey
   // prefix on two visual lines, and so the collapsed display does not
   // duplicate the prefix (a native <select>'s collapsed text is
@@ -76,17 +76,17 @@ export class MeshCorePanel extends LitElement {
   @state() private _traceDialogContactName = '';
   @state() private _traceDialogResult: TraceResult | null = null;
   @state() private _traceDialogError = '';
-  // Session 54: trace-dialog has an input phase before running.  Store
+  // The trace-dialog has an input phase before running.  Store
   // the target so the `trace-requested` handler can fire traceContact()
   // after the user picks a path type.
   @state() private _traceDialogPubkeyPrefix = '';
   @state() private _traceDialogEntryId: string | undefined = undefined;
-  // Session 55: pass the full Contact record through to the dialog so it
+  // Pass the full Contact record through to the dialog so it
   // can pre-populate forwarding-class targets as the last hop.  Null for
   // ManagedDevice invocations or when we have no Contact record.
   @state() private _traceDialogTargetContact: Contact | null = null;
 
-  // Session 56: target-picker is a pre-dialog step that only appears for
+  // The target-picker is a pre-dialog step that only appears for
   // companion-entry traces (settings-tab Trace button).  Nodes-tab
   // traces come with a pre-chosen target and bypass the picker entirely,
   // opening the trace-dialog directly.  _pendingTraceEntryId caches the
@@ -132,14 +132,14 @@ export class MeshCorePanel extends LitElement {
         color: var(--secondary-text-color);
       }
 
-      /* Phase 3 (A.3): the multi-entry device switcher is a custom
-         dropdown (button + listbox) instead of a native <select>, so
-         each option can render name + pubkey-prefix as separate
-         visual lines and so the collapsed display does not duplicate
-         the prefix. The single-entry case shares the same wrap class
-         and same name+prefix sibling layout. Forensics F-A: node_name
-         and identity keys are independent fields by firmware design;
-         showing both makes the distinction visible to the user. */
+      /* The multi-entry device switcher is a custom dropdown (button +
+         listbox) instead of a native <select>, so each option can
+         render name + pubkey-prefix as separate visual lines and so the
+         collapsed display does not duplicate the prefix. The
+         single-entry case shares the same wrap class and same
+         name+prefix sibling layout. node_name and identity keys are
+         independent fields by firmware design; showing both makes the
+         distinction visible to the user. */
       .device-info-wrap {
         position: relative; /* anchor for the absolutely-positioned menu */
         display: inline-flex;
@@ -528,10 +528,9 @@ export class MeshCorePanel extends LitElement {
 
   constructor() {
     super();
-    // Phase 2: register the panel's mark-read-requested handler. The
-    // panel owns the WS round-trip + unread bookkeeping; the emitter
-    // (the controller's read-progress mutators) lands in Phase 3, so
-    // this handler is registered-but-unfired in Phase 2.
+    // Register the panel's mark-read-requested handler. The panel owns
+    // the WS round-trip + unread bookkeeping; the emitter is the
+    // controller's read-progress mutators.
     this._unread.onMarkReadRequested((entityId) => {
       this._handleMarkReadRequested(entityId);
     });
@@ -578,7 +577,7 @@ export class MeshCorePanel extends LitElement {
   private _selectDevice(entryId: string) {
     if (entryId !== this._selectedEntryId) {
       this._selectedEntryId = entryId;
-      // Change 3.1: clear any pending chat target from the previous
+      // Clear any pending chat target from the previous
       // entry (e.g., a "Message" action on a node-page contact that
       // doesn't exist on the new entry). Combined with the entry-
       // switch branch in chat-page's `updated()` lifecycle, this
@@ -591,8 +590,8 @@ export class MeshCorePanel extends LitElement {
       // (mutating `selectedId` from inside chat-page would be
       // re-asserted by Lit prop binding on the next render pass).
       this._pendingChatTarget = null;
-      // F01 fix: the backend filters unread counts by entry_id (Phase 4
-      // ws_get_unread_counts), so stale counts from the previously-
+      // The backend filters unread counts by entry_id in
+      // ws_get_unread_counts, so stale counts from the previously-
       // selected entry remain in the controller's count map until the
       // next `meshcore_unread_updated` bus event fires — could be
       // minutes on a quiet mesh. Run the unread refresh in parallel
@@ -999,8 +998,8 @@ export class MeshCorePanel extends LitElement {
   }
 
   /**
-   * Phase 2 v5: handle the `device-renamed` event from the settings
-   * page's post-rename modal. Re-fetch `getDevices(...)` so
+   * Handle the `device-renamed` event from the settings page's
+   * post-rename modal. Re-fetch `getDevices(...)` so
    * `_devices` (and the computed `_selectedDevice`) reflect the new
    * companion name immediately, and re-derive `_config.node_name`
    * (used by the panel header). The settings page itself already
@@ -1028,14 +1027,14 @@ export class MeshCorePanel extends LitElement {
   private async _loadUnreadCounts() {
     if (!this.hass) return;
     try {
-      // Phase 4 (Change 9): fetch both maps in one round-trip — the
-      // backend returns them in the same payload, and the chat page
-      // needs both for anchor-driven open.
+      // Fetch both maps in one round-trip — the backend returns them in
+      // the same payload, and the chat page needs both for anchor-driven
+      // open.
       const result = await getUnreadAndLastRead(
         this.hass,
         this._selectedEntryId || undefined,
       );
-      // Phase 2: route the backend payload through the controller.
+      // Route the backend payload through the controller.
       // `ingestBackendData` folds in the actively-viewed-conversation
       // zeroing that used to be inline here, and notifies the
       // controller's subscribers (i.e. `<chat-page>`).
@@ -1051,13 +1050,12 @@ export class MeshCorePanel extends LitElement {
    * plus the unread bookkeeping — optimistic local zero + an
    * authoritative refresh.
    *
-   * Phase 3 made this live: the controller's read-progress mutators
-   * (`onScrollState` / `onPillJump`, via the deferred post-switch
-   * timer) now call `requestMarkRead`, which fires this handler. It is
-   * the sole owner of the mark-read round-trip — chat-page's old
-   * direct `markConversationRead` call (in the retired `_markActiveRead`)
-   * and the `unread-cleared` event + `_onUnreadCleared` handler are
-   * all gone.
+   * The controller's read-progress mutators (`onScrollState` /
+   * `onPillJump`, via the deferred post-switch timer) call
+   * `requestMarkRead`, which fires this handler. It is the sole owner
+   * of the mark-read round-trip — there is no longer any direct
+   * `markConversationRead` call from chat-page or an `unread-cleared`
+   * event path.
    */
   private _handleMarkReadRequested(entityId: string) {
     if (!entityId || !this.hass) return;
@@ -1117,7 +1115,7 @@ export class MeshCorePanel extends LitElement {
 
       case 'trace':
         if (pubkeyPrefix) {
-          // Session 54: open dialog in input phase.  User picks path type
+          // Open dialog in input phase.  User picks path type
           // (discovery / select repeaters / enter path) and clicks Run
           // Trace.  The dialog fires `trace-requested`, which is handled
           // by _onTraceRequested below — that's where the actual WS call
@@ -1126,7 +1124,7 @@ export class MeshCorePanel extends LitElement {
           this._traceDialogPubkeyPrefix = pubkeyPrefix;
           this._traceDialogEntryId = entryId;
           this._traceDialogContactName = node.adv_name || pubkeyPrefix;
-          // Session 55: pass the full Contact record to the dialog so it
+          // Pass the full Contact record to the dialog so it
           // can pre-populate forwarding-class targets (type 2/3/4) as the
           // single last-hop entry.  Mirrors the `'adv_name' in node` check
           // used in node-detail-dialog.ts:256; ManagedDevice invocations
@@ -1183,7 +1181,7 @@ export class MeshCorePanel extends LitElement {
     }
   }
 
-  // ─── Session 54: trace-dialog input-phase handler ──────────────────
+  // ─── trace-dialog input-phase handler ──────────────────────────────
   //
   // The trace-dialog now opens in an input phase; when the user clicks
   // Run Trace, the dialog emits `trace-requested` with { pathMode, path }.
@@ -1215,7 +1213,7 @@ export class MeshCorePanel extends LitElement {
     }
   };
 
-  // ─── Session 56: companion-trace entry + target-picker handlers ────
+  // ─── companion-trace entry + target-picker handlers ────────────────
   //
   // The settings-tab Trace button dispatches `companion-trace-requested`
   // with the current companion's entry_id.  We cache it and open the

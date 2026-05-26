@@ -18,7 +18,7 @@ export class NodeDetailDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog. When a
+    // Focus trap + Escape closes the dialog. When a
     // confirm sub-section is showing, Escape backs out of confirm mode
     // rather than closing the whole dialog — matches the Cancel button.
     attachDialogA11y(this, {

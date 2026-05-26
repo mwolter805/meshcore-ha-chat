@@ -24,7 +24,7 @@ export class CommandDialog extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog.
+    // Focus trap + Escape closes the dialog.
     attachDialogA11y(this, {
       isOpen: () => this.open,
       onEscape: () => this._onClose(),

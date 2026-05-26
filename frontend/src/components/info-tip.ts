@@ -5,7 +5,7 @@ import { customElement, property, state } from 'lit/decorators.js';
  * Info-icon tooltip — the `ⓘ` button that sits next to a metric label
  * (in hero tiles and in the row's label cell of the sensor table).
  *
- * Per the locked Q7 resolution, threshold-bearing values do NOT use
+ * By design, threshold-bearing values do NOT use
  * native `title=` attributes. Instead, this component renders a focusable
  * button whose hover, focus, and tap state opens a positioned popover
  * with the band-statement prose and an optional citation footer.

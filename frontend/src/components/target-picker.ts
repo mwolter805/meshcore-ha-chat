@@ -5,7 +5,7 @@ import type { Contact } from '../types';
 import { attachDialogA11y } from '../utils/dialog-a11y';
 
 /**
- * Session 56: target-picker.
+ * Target-picker.
  *
  * Modal that appears when the user invokes Trace from the settings-tab
  * Companion quick-actions row.  Lets the user pick any contact by type
@@ -40,7 +40,7 @@ export class TargetPicker extends LitElement {
 
   constructor() {
     super();
-    // Phase 5 Q13: focus trap + Escape closes the dialog. Replaces the
+    // Focus trap + Escape closes the dialog. Replaces the
     // document-level keydown listener previously installed in
     // connectedCallback() — the controller's host-scoped listener
     // handles both Escape and Tab cycling, with no leak risk on

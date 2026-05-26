@@ -64,7 +64,7 @@ export async function getChannels(
 /**
  * Send a message to a channel.
  *
- * Phase 4.5 (forensics Fix 5): the optional ``entryId`` is forwarded as
+ * The optional ``entryId`` is forwarded as
  * ``entry_id`` in the upstream ``meshcore.send_channel_message`` service
  * call so the message routes to the selected upstream coordinator. When
  * omitted, the upstream service iterates ``hass.data[meshcore]`` and
@@ -93,8 +93,8 @@ export async function sendChannelMessage(
 /**
  * Send a direct message to a contact by pubkey prefix.
  *
- * Phase 4.5 (forensics Fix 5): see ``sendChannelMessage`` above for the
- * rationale on threading ``entryId`` through to upstream ``meshcore.send_message``.
+ * See ``sendChannelMessage`` above for the rationale on threading
+ * ``entryId`` through to upstream ``meshcore.send_message``.
  */
 export async function sendDirectMessage(
   hass: HomeAssistant,
@@ -155,7 +155,7 @@ export async function getDeviceConfig(
 }
 
 /**
- * Phase 2 v4: when a `name` change goes through the rename-migration
+ * When a `name` change goes through the rename-migration
  * branch (new_name != old_name + meshcore entry resolved), the WS
  * handler returns a `rename` block summarizing the migration so the
  * panel can render a persistent post-rename dialog. Absent for
@@ -369,7 +369,7 @@ export async function getNeighbors(
 }
 
 /**
- * Get blocked contacts (Task 8.1)
+ * Get blocked contacts.
  */
 export async function getBlockedContacts(
   hass: HomeAssistant,
@@ -406,7 +406,7 @@ export interface TraceResult {
 }
 
 /**
- * Session 54: trace path-selection mode. `discovery` runs the existing
+ * Trace path-selection mode. `discovery` runs the existing
  * flood path discovery; `select` and `explicit` supply an explicit
  * outbound hop sequence and skip discovery. Backend only inspects `path`;
  * `pathMode` is sent for frontend-side clarity / future backend use.
@@ -418,7 +418,7 @@ export type TracePathMode = 'discovery' | 'select' | 'explicit';
  * Resolves with timing, hop count, and per-hop SNR data.
  * Rejects on timeout or SDK error.
  *
- * Session 54: optional `pathMode` + `path` (comma-separated hex hops,
+ * Optional `pathMode` + `path` (comma-separated hex hops,
  * e.g. "86,AE"). When pathMode is 'select' or 'explicit' and `path` is
  * provided, backend skips flood path discovery and calls send_trace with
  * the explicit path. Defaulted `pathMode` keeps two-arg call sites
@@ -447,7 +447,7 @@ export async function traceContact(
 }
 
 /**
- * Toggle contact blocked status (Task 8.16)
+ * Toggle contact blocked status.
  */
 export async function toggleBlockContact(
   hass: HomeAssistant,
@@ -518,15 +518,15 @@ export async function removeContact(
 /**
  * Backend response shape for ``meshcore_chat/get_unread_counts``.
  *
- * Phase 1 (commit 805f589) extended the WS payload from a single
+ * An earlier change extended the WS payload from a single
  * ``unread`` map to ``{unread, last_read}``. The ``last_read`` map is
  * the per-entity message-ID cursor snapshotted at the most recent
  * ``mark_read`` call (or absent if the conversation has never been
- * marked read on this install). Phase 4's anchor-driven open consumes
+ * marked read on this install). The anchor-driven open consumes
  * this map.
  *
  * Backwards-compatible: older clients that only read ``unread`` keep
- * working unchanged. Newer clients (Phase 4 panel) read both.
+ * working unchanged. Newer clients read both.
  */
 export interface UnreadCountsResponse {
   unread: Record<string, number>;
@@ -536,7 +536,7 @@ export interface UnreadCountsResponse {
 /**
  * Fetch both unread counts and last-read cursors in one round-trip.
  *
- * Phase 4 sibling helper to ``getUnreadCounts`` — the panel needs the
+ * Sibling helper to ``getUnreadCounts`` — the panel needs the
  * cursor map (for anchor-driven open) at the same time it needs the
  * unread counts (for sidebar badges), and the backend already returns
  * both fields in a single payload, so an extra WS call would be
@@ -574,18 +574,18 @@ export async function markConversationRead(
   } catch { return { success: false }; }
 }
 
-// ─── Last-read anchor (Phase 2 backend / Phase 3 frontend) ────────────────
+// ─── Last-read anchor ─────────────────────────────────────────────────────
 
 /**
  * Backend response shape for ``meshcore_chat/get_messages_around``.
  *
- * Mirrors ``ws_get_messages_around`` (Phase 2, commit 55dc791). The
+ * Mirrors the backend ``ws_get_messages_around`` handler. The
  * window includes the anchor message itself; ``anchor_index`` is the
  * anchor's offset within ``messages``. ``has_more_before`` /
  * ``has_more_after`` drive the symmetric lazy-load triggers in
  * ``MessageStore.loadOlderMessages`` / ``loadNewerMessages``.
  *
- * R3 fallback: when the anchor isn't present in the conversation
+ * Fallback: when the anchor isn't present in the conversation
  * (pruned / fresh install / entity rename), the backend returns the
  * newest ``before_limit + after_limit`` messages with
  * ``anchor_found: false`` and ``anchor_index: messages.length`` (panel
@@ -602,15 +602,13 @@ export interface MessagesAroundResponse {
 /**
  * Fetch a window of messages around an anchor message ID.
  *
- * Phase 3 thin wrapper around ``meshcore_chat/get_messages_around``
- * (Phase 2 backend). Used by ``MessageStore.switchEntity(entityId,
- * anchorId)`` to load the "last-read window" — ``beforeLimit`` messages
- * older than the anchor + ``afterLimit`` messages newer than it, in a
- * single round-trip.
+ * Thin wrapper around ``meshcore_chat/get_messages_around``. Used by
+ * ``MessageStore.switchEntity(entityId, anchorId)`` to load the
+ * "last-read window" — ``beforeLimit`` messages older than the anchor
+ * + ``afterLimit`` messages newer than it, in a single round-trip.
  *
- * Defaults match the proposal: 25 older + 50 newer. Both limits are
- * passed as WS payload keys (the schema is keyed via ``vol.Optional``,
- * not positional — see Phase 2 caveat in the proposal handoff).
+ * Defaults: 25 older + 50 newer. Both limits are passed as WS payload
+ * keys (the schema is keyed via ``vol.Optional``, not positional).
  *
  * Mirrors ``markConversationRead`` shape (no try/catch swallow — the
  * caller decides how to handle a network failure; ``MessageStore``
@@ -639,7 +637,7 @@ export async function getMessagesAround(
 // ─── Identity Management ─────────────────────────────────────────────────
 
 /**
- * Streaming-progress identity flow (Phase 1.1).
+ * Streaming-progress identity flow.
  *
  * The chat backend's ``ws_regenerate_identity`` / ``ws_import_identity``
  * handlers emit one ``event_message`` per step (generating →
