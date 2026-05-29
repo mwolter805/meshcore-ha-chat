@@ -1,4 +1,5 @@
 import { CommandDef } from '../types';
+import { AUTOADD_BITS } from '../firmware-vocabulary';
 
 /**
  * Local device commands — executed directly on the connected companion device
@@ -199,10 +200,15 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     params: [
       {
         name: 'mode',
+        label: 'Path Hash Mode',
         type: 'select',
-        description: 'Path hash mode (0=1-Byte, 1=2-Byte, 2=3-Byte)',
+        description: 'Routing path-hash width',
         required: true,
-        options: ['0', '1', '2'],
+        selectOptions: [
+          { label: '1-Byte (0)', value: 0 },
+          { label: '2-Byte (1)', value: 1 },
+          { label: '3-Byte (2)', value: 2 },
+        ],
       },
     ],
   },
@@ -346,11 +352,12 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'val',
-        type: 'number',
-        description: 'Multi-acks setting (0 or 1)',
+        name: 'multi_acks',
+        label: 'Multi-Acks',
+        type: 'boolean',
+        description: 'Enable multi-acks',
         required: true,
-        options: ['0', '1'],
+        default: false,
       },
     ],
   },
@@ -360,11 +367,16 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Network',
     params: [
       {
-        name: 'policy',
+        name: 'advert_loc_policy',
+        label: 'Location Ad Policy',
         type: 'select',
-        description: 'Policy: 0=none, 1=prefs (saved), 2=share (live GPS)',
+        description: 'How this node shares its location in adverts',
         required: true,
-        options: ['0', '1', '2'],
+        selectOptions: [
+          { label: 'None (0)', value: 0 },
+          { label: 'Share — Live GPS (1)', value: 1 },
+          { label: 'Saved Prefs (2)', value: 2 },
+        ],
       },
     ],
   },
@@ -374,10 +386,12 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'flag',
+        name: 'manual_add_contacts',
+        label: 'Manual Add Contacts',
         type: 'boolean',
-        description: 'Enable manual contact addition',
+        description: 'Enable manual contact addition (off = auto-add)',
         required: true,
+        default: false,
       },
     ],
   },
@@ -387,10 +401,16 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'mode',
-        type: 'number',
-        description: 'Telemetry mode',
+        name: 'telemetry_mode_base',
+        label: 'Base Telemetry Mode',
+        type: 'select',
+        description: 'Who may read base telemetry',
         required: true,
+        selectOptions: [
+          { label: 'Deny (0)', value: 0 },
+          { label: 'Allow Per Contact Flags (1)', value: 1 },
+          { label: 'Allow All (2)', value: 2 },
+        ],
       },
     ],
   },
@@ -400,10 +420,16 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'mode',
-        type: 'number',
-        description: 'Location telemetry mode',
+        name: 'telemetry_mode_loc',
+        label: 'Location Telemetry Mode',
+        type: 'select',
+        description: 'Who may read location telemetry',
         required: true,
+        selectOptions: [
+          { label: 'Deny (0)', value: 0 },
+          { label: 'Allow Per Contact Flags (1)', value: 1 },
+          { label: 'Allow All (2)', value: 2 },
+        ],
       },
     ],
   },
@@ -413,10 +439,16 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'mode',
-        type: 'number',
-        description: 'Environment telemetry mode',
+        name: 'telemetry_mode_env',
+        label: 'Environment Telemetry Mode',
+        type: 'select',
+        description: 'Who may read environment telemetry',
         required: true,
+        selectOptions: [
+          { label: 'Deny (0)', value: 0 },
+          { label: 'Allow Per Contact Flags (1)', value: 1 },
+          { label: 'Allow All (2)', value: 2 },
+        ],
       },
     ],
   },
@@ -947,9 +979,11 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     params: [
       {
         name: 'flag',
-        type: 'number',
-        description: 'Auto-add configuration flag',
+        label: 'Auto-Add Config',
+        type: 'bitmask',
+        description: 'Which contact types to auto-add, plus overwrite-oldest policy',
         required: true,
+        bits: AUTOADD_BITS,
       },
     ],
   },

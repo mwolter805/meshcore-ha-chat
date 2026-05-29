@@ -954,7 +954,11 @@ export const panelStyles = css`
     border-radius: 6px;
     padding: 12px;
     margin-top: 12px;
-    white-space: pre-wrap;
+    /* normal (not pre-wrap): the structured/grid render path is built from
+       indented template literals; pre-wrap would render that indentation as
+       blank lines. The plain-text fallback wraps itself in a pre-wrap span to
+       preserve multi-line CLI output. */
+    white-space: normal;
     word-wrap: break-word;
     max-height: 200px;
     overflow-y: auto;

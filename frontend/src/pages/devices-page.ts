@@ -725,6 +725,7 @@ export class DevicesPage extends LitElement {
         .hass=${this.hass}
         .entryId=${this.config?.entry_id}
         .targetPrefix=${this._commandDialogTarget}
+        .nodeName=${this.config?.node_name ?? ''}
         ?isLocal=${this._commandDialogIsLocal}
         ?narrow=${this.narrow}
         @close=${this._onCommandDialogClose}>
@@ -931,8 +932,6 @@ export class DevicesPage extends LitElement {
         <div class="actions-row">
           <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeRemoteAction(device, 'advert')}>Flood Advert</button>
           <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeRemoteAction(device, 'clock sync')}>Sync Clock</button>
-          <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeRemoteAction(device, 'get bat')}>Req Telemetry</button>
-          <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeRemoteAction(device, 'get uptime')}>Req Status</button>
         </div>
       </div>
     `;
@@ -1193,7 +1192,14 @@ export class DevicesPage extends LitElement {
 
     try {
       const result = await executeRemote(this.hass, device.pubkey_prefix, command, this.config?.entry_id);
-      this._showStatusMessage(`${device.name}: ${command} → ${result.response || 'OK'}`, 'success');
+      // executeRemote() catches WS errors and returns { success: false, response }
+      // rather than throwing, so we must check result.success here — a thrown
+      // error only happens for client-side exceptions (caught below).
+      if (result.success) {
+        this._showStatusMessage(`${device.name}: ${command} → ${result.response || 'OK'}`, 'success');
+      } else {
+        this._showStatusMessage(`${device.name}: ${command} failed — ${result.response || 'error'}`, 'error');
+      }
     } catch (error) {
       this._showStatusMessage(`${device.name}: ${command} failed — ${String(error)}`, 'error');
     }

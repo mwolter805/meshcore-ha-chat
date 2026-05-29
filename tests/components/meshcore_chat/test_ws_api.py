@@ -1233,6 +1233,109 @@ async def test_ws_execute_remote_send_login_sync_raise_aborts_command(
     assert not conn.results
 
 
+async def test_ws_execute_remote_login_unconfirmed_annotates_response(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync returns None with a password → response is annotated.
+
+    Phase 2 (Option A): on simple_repeater firmware a wrong password is
+    indistinguishable from a transient timeout (both surface as a None
+    return), so the handler proceeds with the command and prefixes the
+    response text with "Login not confirmed — " so the user can tell
+    the login wasn't confirmed.
+    """
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(return_value=None)
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="cmd-resp")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_execute_remote,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "command": "ver"},
+    )
+
+    coordinator.api.mesh_core.commands.send_cmd.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "ver"
+    )
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["success"] is True
+    assert payload["response"].startswith("Login not confirmed — ")
+    assert "cmd-resp" in payload["response"]
+
+
+async def test_ws_execute_remote_login_confirmed_no_annotation(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync returns a truthy event → response is NOT annotated.
+
+    Phase 2 (Option A): on a healthy login, the advisory prefix must NOT
+    appear — only the bare command response text is returned.
+    """
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    # Truthy non-None return → login was confirmed.
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(
+        return_value=MagicMock(payload="LOGIN_SUCCESS")
+    )
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="cmd-resp")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_execute_remote,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "command": "ver"},
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["success"] is True
+    assert not payload["response"].startswith("Login not confirmed"), (
+        f"healthy login wrongly annotated: {payload['response']!r}"
+    )
+
+
+async def test_ws_execute_remote_no_password_no_annotation(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """No password (client device or repeater without one) → send_login_sync skipped, no annotation."""
+    coordinator._tracked_repeaters = []
+    coordinator._tracked_clients = [
+        {"pubkey_prefix": "cli1"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "cli1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock()
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="cmd-resp")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_execute_remote,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "cli1", "command": "ver"},
+    )
+
+    coordinator.api.mesh_core.commands.send_login_sync.assert_not_called()
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["success"] is True
+    assert not payload["response"].startswith("Login not confirmed")
+
+
 # ─── ws_set_channel / ws_remove_channel (DESTRUCTIVE) ───────────────────
 
 
@@ -1429,6 +1532,73 @@ async def test_ws_remove_neighbor_send_login_sync_raise_aborts_command(
     coordinator.api.mesh_core.commands.send_cmd.assert_not_called()
     assert conn.errors, "expected error surfaced via _ws_send_error_safe"
     assert not conn.results
+
+
+async def test_ws_remove_neighbor_login_unconfirmed_annotates_response(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync returns None with a password → response is annotated.
+
+    Phase 2 (Option A): parity with ws_execute_remote — proceed with the
+    neighbor.remove and prefix the response text with the
+    "Login not confirmed — " advisory.
+    """
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(return_value=None)
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="cmd-resp")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_remove_neighbor,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "neighbor_pubkey": "n0deadbeef"},
+    )
+
+    coordinator.api.mesh_core.commands.send_cmd.assert_awaited_once_with(
+        {"public_key": "rpt1deadbeef"}, "neighbor.remove n0deadbeef"
+    )
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["success"] is True
+    assert payload["response"].startswith("Login not confirmed — ")
+    assert "cmd-resp" in payload["response"]
+
+
+async def test_ws_remove_neighbor_login_confirmed_no_annotation(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """send_login_sync returns a truthy event → response is NOT annotated."""
+    coordinator._tracked_repeaters = [
+        {"pubkey_prefix": "rpt1", "password": "secret"}
+    ]
+    coordinator.api.mesh_core.get_contact_by_key_prefix = MagicMock(
+        return_value={"public_key": "rpt1deadbeef"}
+    )
+    coordinator.api.mesh_core.commands.send_login_sync = AsyncMock(
+        return_value=MagicMock(payload="LOGIN_SUCCESS")
+    )
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="cmd-resp")
+
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_remove_neighbor,
+        hass,
+        conn,
+        {"id": 1, "target_prefix": "rpt1", "neighbor_pubkey": "n0deadbeef"},
+    )
+
+    assert not conn.errors
+    payload = conn.results[0][1]
+    assert payload["success"] is True
+    assert not payload["response"].startswith("Login not confirmed"), (
+        f"healthy login wrongly annotated: {payload['response']!r}"
+    )
 
 
 async def test_ws_cleanup_stale_neighbors_happy(

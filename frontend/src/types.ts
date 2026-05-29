@@ -278,14 +278,25 @@ export interface DeviceConfig {
  * Command parameter definition
  */
 export interface CommandParam {
+  /**
+   * Wire argument name. For local commands this MUST match the SDK command
+   * method's keyword-argument name — `ws_execute_local` calls
+   * `command_method(**args)` with no remapping, so a mismatch raises
+   * TypeError. For remote commands the value is positionally space-joined
+   * into the CLI string, so `name` is display-only there.
+   */
   name: string;
-  type: 'string' | 'number' | 'boolean' | 'select';
+  /** Human-readable label shown in the form. Falls back to `name`. */
+  label?: string;
+  type: 'string' | 'number' | 'boolean' | 'select' | 'bitmask';
   description: string;
   required?: boolean;
   default?: unknown;
   min?: number;
   max?: number;
-  options?: string[];
+  options?: string[];                                                 // legacy: label === submitted value (always a string)
+  selectOptions?: Array<{ label: string; value: string | number }>;  // structured select: label/value separable, value type preserved
+  bits?: Array<{ label: string; value: number }>;                    // for type 'bitmask': checkbox per bit, submits the OR as a number
 }
 
 /**

@@ -222,8 +222,15 @@ export async function executeLocal(
     }>(msg);
     return result;
   } catch (error) {
+    // A rejected hass.callWS rejects with an object like { code, message };
+    // String(error) on that renders the useless "[object Object]". Surface the
+    // real message/code instead.
+    const e = error as { code?: string; message?: string };
+    const msg = e && e.message
+      ? (e.code ? `${e.message} (${e.code})` : e.message)
+      : String(error);
     return {
-      response: String(error),
+      response: msg,
       success: false,
       timestamp: new Date().toISOString(),
     };
@@ -253,8 +260,15 @@ export async function executeRemote(
     }>(msg);
     return result;
   } catch (error) {
+    // A rejected hass.callWS rejects with an object like { code, message };
+    // String(error) on that renders the useless "[object Object]". Surface the
+    // real message/code instead.
+    const e = error as { code?: string; message?: string };
+    const msg = e && e.message
+      ? (e.code ? `${e.message} (${e.code})` : e.message)
+      : String(error);
     return {
-      response: String(error),
+      response: msg,
       success: false,
       timestamp: new Date().toISOString(),
     };

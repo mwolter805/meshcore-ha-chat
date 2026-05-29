@@ -170,7 +170,14 @@ describe('UnreadController — counts identity', () => {
 // ─── ingestBackendData ───────────────────────────────────────────────────
 
 describe('UnreadController — ingestBackendData', () => {
-  it('zeroes the active entity', () => {
+  it('does not special-case the active entity (backend cursor is authoritative)', () => {
+    // ingestBackendData copies the backend unread map verbatim. The active
+    // entity is intentionally NOT zeroed here: zeroing it would blank the
+    // badge of a conversation the user is viewing whenever a background
+    // unread refresh runs (cross-channel mesh activity, or a second browser
+    // on the same host), even when the read cursor had not advanced. Counts
+    // reach zero only via clearEntity + the authoritative refresh after a
+    // mark-read round-trip.
     const c = new UnreadController();
     c.ingestBackendData(
       {
@@ -182,7 +189,7 @@ describe('UnreadController — ingestBackendData', () => {
       },
       'binary_sensor.meshcore_aa1234_ch_1_messages',
     );
-    expect(c.counts['binary_sensor.meshcore_aa1234_ch_1_messages']).toBe(0);
+    expect(c.counts['binary_sensor.meshcore_aa1234_ch_1_messages']).toBe(7);
     expect(c.counts['binary_sensor.meshcore_aa1234_ch_2_messages']).toBe(2);
   });
 

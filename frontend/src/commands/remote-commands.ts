@@ -494,11 +494,14 @@ export const REMOTE_COMMANDS: CommandDef[] = [
     params: [
       {
         name: 'val',
-        type: 'number',
-        description: 'Multi-acks setting (0 or 1)',
+        label: 'Multi-Acks',
+        type: 'select',
+        description: 'Enable multi-acks',
         required: true,
-        min: 0,
-        max: 1,
+        selectOptions: [
+          { label: 'On (1)', value: 1 },
+          { label: 'Off (0)', value: 0 },
+        ],
       },
     ],
     responseFormat: 'OK - multi-acks set',
@@ -589,10 +592,15 @@ export const REMOTE_COMMANDS: CommandDef[] = [
     params: [
       {
         name: 'mode',
+        label: 'Path Hash Mode',
         type: 'select',
-        description: 'Path hash mode (0=1-Byte, 1=2-Byte, 2=3-Byte)',
+        description: 'Routing path-hash width',
         required: true,
-        options: ['0', '1', '2'],
+        selectOptions: [
+          { label: '1-Byte (0)', value: 0 },
+          { label: '2-Byte (1)', value: 1 },
+          { label: '3-Byte (2)', value: 2 },
+        ],
       },
     ],
     responseFormat: 'OK - path hash mode set',
