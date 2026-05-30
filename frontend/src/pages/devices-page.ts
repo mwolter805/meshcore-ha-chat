@@ -277,7 +277,11 @@ export class DevicesPage extends LitElement {
 
       .neighbor-table {
         width: 100%;
-        border-collapse: collapse;
+        /* separate (not collapse) so the 1px row dividers render the same
+           crisp/light line as the node-summary sensor grid, rather than the
+           slightly heavier collapsed-border rendering. */
+        border-collapse: separate;
+        border-spacing: 0;
         font-size: 13px;
         margin-top: 8px;
       }
@@ -877,6 +881,13 @@ export class DevicesPage extends LitElement {
     const fallbackLon = contact?.adv_lon;
     const fallbackUpdated = contact?.last_advert;
 
+    // Location is shown as a compact header stat (after Key) rather than a
+    // hero tile — it's not critical info. Hidden when there's no usable fix.
+    const locLat = typeof fallbackLat === 'number' ? fallbackLat : NaN;
+    const locLon = typeof fallbackLon === 'number' ? fallbackLon : NaN;
+    const hasLoc = Number.isFinite(locLat) && Number.isFinite(locLon)
+      && (locLat !== 0 || locLon !== 0);
+
     // Lazy-load neighbors on first render if enabled
     if (showNeighbors && !neighborState) {
       this._loadNeighbors(device);
@@ -897,6 +908,9 @@ export class DevicesPage extends LitElement {
                 <span>${type === 'repeater' ? 'Repeater' : 'Client'}</span>
                 ${device.firmware_version ? html`<span>Firmware: v${device.firmware_version.match(/(\d+\.\d+\.\d+)/)?.[1] ?? device.firmware_version}</span>` : nothing}
                 <span>Key: ${device.pubkey_prefix}</span>
+                ${hasLoc
+                  ? html`<span>Loc: ${locLat.toFixed(4)}, ${locLon.toFixed(4)}</span>`
+                  : nothing}
               </div>
             </div>
           </div>

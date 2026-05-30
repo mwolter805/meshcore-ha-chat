@@ -1,5 +1,5 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant, ManagedDevice } from '../types';
 import type { EntityInfo } from '../utils/classify-entity';
 import {
@@ -12,7 +12,9 @@ import { longPress } from '../directives/long-press';
 import './stat-bar';
 import './stacked-bar';
 import './info-tip';
+import './message-rate-chart';
 import type { StackedBarSegment } from './stacked-bar';
+import type { RatePoint } from './message-rate-chart';
 
 /**
  * Synthesized device descriptor for the Settings tab's companion device.
@@ -81,8 +83,17 @@ export class NodeSummary extends LitElement {
    *  the coordinates in the Location hero tile. */
   @property({ type: Number }) fallbackUpdated?: number;
 
+  /** 48h message-rate history (msg/min) for the activity chart, fetched from
+   *  recorder statistics for the node's *_rate sensors. */
+  @state() private _rateHistory: RatePoint[] = [];
+  /** Guard: the nb_sent entity_id the current _rateHistory was fetched for,
+   *  so we fetch once per device rather than on every hass state push. */
+  private _rateHistoryKey: string | null = null;
+
   static styles = css`
-    :host { display: block; }
+    /* container-type lets the sensor grid's @container query react to this
+       card's own width rather than the raw viewport. */
+    :host { display: block; container-type: inline-size; }
 
     /* ─── Hero row ─── */
     .hero-row {
@@ -213,48 +224,55 @@ export class NodeSummary extends LitElement {
       margin-left: 6px;
     }
 
-    /* ─── Sensor table ─── */
-    .sensor-table {
-      width: 100%;
-      border-collapse: collapse;
+    /* ─── Sensor grid ─── responsive: one column on a narrow card, two
+       once the card is wide. The breakpoint is a @container query keyed on
+       :host's inline-size, so it reacts to the card width (panel layout,
+       sidebar state) rather than just the raw viewport. Category headers
+       span the full width so paired sensors stay within their category. */
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      column-gap: 28px;
     }
-    .sensor-table tbody tr.data-row {
-      border-top: 1px solid var(--divider-color);
+    @container (min-width: 620px) {
+      .sensor-grid { grid-template-columns: 1fr 1fr; }
     }
-    .sensor-table tbody tr.data-row:first-child { border-top: none; }
-    .sensor-table tbody tr.data-row:hover {
-      background: rgba(127, 127, 127, 0.06);
-      cursor: pointer;
-    }
-    .sensor-table td {
-      padding: 8px 6px;
-      vertical-align: middle;
-      font-size: 13px;
-    }
-    .col-status { width: 14px; padding-left: 4px; padding-right: 0; }
-    .col-label  { width: 36%; color: var(--secondary-text-color); }
-    .col-value  {
-      width: 22%;
-      color: var(--primary-text-color);
-      font-weight: 500;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
-    .col-bar    { padding-left: 12px; padding-right: 0; }
-    .col-bar meshcore-stat-bar { width: 100%; min-width: 80px; }
-
-    .group-row td {
+    .group-label {
+      grid-column: 1 / -1;
       padding: 12px 4px 4px;
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       color: var(--secondary-text-color);
-      border-top: none !important;
     }
-    .group-row + tr.data-row { border-top: none !important; }
-
-    .stacked-row td.col-bar { padding-top: 6px; padding-bottom: 6px; }
+    .sensor-item {
+      display: grid;
+      grid-template-columns: 14px minmax(0, 1fr) auto minmax(72px, 120px);
+      align-items: center;
+      gap: 10px;
+      padding: 8px 4px;
+      border-top: 1px solid var(--divider-color);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .sensor-item:hover { background: rgba(127, 127, 127, 0.06); }
+    .si-label {
+      color: var(--secondary-text-color);
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .si-value {
+      color: var(--primary-text-color);
+      font-weight: 500;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .si-bar { min-width: 0; }
+    .si-bar meshcore-stat-bar { width: 100%; }
 
     .unit {
       font-size: 11px;
@@ -298,6 +316,61 @@ export class NodeSummary extends LitElement {
       color: var(--primary-text-color);
       font-style: normal;
     }
+    /* Thin red line beneath the Messages Received composition bar showing
+       the lifetime receive-error share. */
+    .err-line {
+      height: 3px;
+      width: 100%;
+      margin-top: 3px;
+      background: var(--divider-color, #e0e0e0);
+      border-radius: 2px;
+      overflow: hidden;
+      cursor: help;
+    }
+    .err-line-fill {
+      height: 100%;
+      background: var(--bad, #f44336);
+    }
+    /* Duplicates line — same thin track, amber fill, stacked under the
+       error line. */
+    .dup-line {
+      height: 3px;
+      width: 100%;
+      margin-top: 2px;
+      background: var(--divider-color, #e0e0e0);
+      border-radius: 2px;
+      overflow: hidden;
+      cursor: help;
+    }
+    .dup-line-fill {
+      height: 100%;
+      background: var(--warning, #ff9800);
+    }
+    /* Unified legend beneath the Messages Received bar stack. */
+    .msg-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      margin-top: 5px;
+      font-size: 10px;
+      color: var(--secondary-text-color);
+    }
+    .msg-legend > span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .msg-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .msg-swatch.flood  { background: var(--info, #2196f3); }
+    .msg-swatch.direct { background: var(--good, #4caf50); }
+    .msg-swatch.error  { background: var(--bad, #f44336); }
+    .msg-swatch.dup    { background: var(--warning, #ff9800); }
   `;
 
   // ─── Render ────────────────────────────────────────────────────────────
@@ -319,6 +392,8 @@ export class NodeSummary extends LitElement {
         ${heroTiles}
       </div>
 
+      ${this._renderMessageActivityCard()}
+
       ${groups.length > 0
         ? html`
           <div class="subsection-label">
@@ -327,12 +402,88 @@ export class NodeSummary extends LitElement {
               : nothing}
           </div>
 
-          <table class="sensor-table">
-            <tbody>
-              ${groups.map((g) => this._renderGroup(g))}
-            </tbody>
-          </table>`
+          <div class="sensor-grid">
+            ${groups.map((g) => this._renderGroup(g))}
+          </div>`
         : nothing}
+    `;
+  }
+
+  // ─── Message activity (48h rate history) ──────────────────────────────
+
+  /** Fetch once per device when entities/hass become available. The hass
+   *  object identity changes on every state push, so guard on the nb_sent
+   *  entity_id to avoid refetching on every update. */
+  updated(changed: Map<string, unknown>) {
+    if (!this.hass || !this.device) return;
+    if (!changed.has('hass') && !changed.has('device') && !changed.has('entities')) return;
+    const nbSent = this._findEntityIdMatching('nb_sent');
+    const key = nbSent?.entity_id ?? null;
+    if (key && key !== this._rateHistoryKey) {
+      this._rateHistoryKey = key;
+      void this._fetchRateHistory();
+    } else if (!key && this._rateHistoryKey !== null) {
+      this._rateHistoryKey = null;
+      this._rateHistory = [];
+    }
+  }
+
+  /** Derive a `_rate` sibling entity_id from a totals entity_id. The rate
+   *  sensors are excluded from `entities` by classify-entity but follow the
+   *  fixed `..._<key>_rate_<suffix>` pattern (mirrors _readDerivedRate). */
+  private _deriveRateId(totalsEid: string, key: string): string {
+    return totalsEid.replace(`_${key}_`, `_${key}_rate_`);
+  }
+
+  private async _fetchRateHistory(): Promise<void> {
+    if (!this.hass) return;
+    // Five series: sent + received split into flood/direct, plus errors.
+    // Each maps a totals entity to its `_rate` sibling statistic.
+    const wanted: Array<[string, string]> = [
+      ['sent_flood', 'sent_flood'],
+      ['sent_direct', 'sent_direct'],
+      ['recv_flood', 'recv_flood'],
+      ['recv_direct', 'recv_direct'],
+      ['errors', 'recv_errors'],
+    ];
+    const series: Array<[string, string]> = [];
+    for (const [seriesKey, totalsKey] of wanted) {
+      const info = this._findEntityIdMatching(totalsKey);
+      if (info) series.push([seriesKey, this._deriveRateId(info.entity_id, totalsKey)]);
+    }
+    if (series.length === 0) { this._rateHistory = []; return; }
+
+    try {
+      const stats = await this.hass.callWS<Record<string, Array<{ start?: string; mean?: number }>>>({
+        type: 'recorder/statistics_during_period',
+        start_time: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        end_time: new Date().toISOString(),
+        statistic_ids: series.map(([, id]) => id),
+        period: 'hour',
+      });
+      const byTs: Record<number, Record<string, number>> = {};
+      for (const [seriesKey, statId] of series) {
+        const pts = stats[statId];
+        if (!Array.isArray(pts)) continue;
+        for (const p of pts) {
+          if (p.start == null || p.mean == null) continue;
+          const ts = new Date(p.start).getTime();
+          (byTs[ts] ??= {})[seriesKey] = p.mean;
+        }
+      }
+      this._rateHistory = Object.entries(byTs)
+        .map(([ts, values]) => ({ timestamp: parseInt(ts, 10), values }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+    } catch {
+      this._rateHistory = [];
+    }
+  }
+
+  private _renderMessageActivityCard() {
+    if (!this._rateHistory.length) return nothing;
+    return html`
+      <div class="subsection-label">Message activity (48h)</div>
+      <meshcore-message-rate-chart .data=${this._rateHistory}></meshcore-message-rate-chart>
     `;
   }
 
@@ -340,11 +491,14 @@ export class NodeSummary extends LitElement {
 
   private _renderHeroTiles(consumed: Set<string>): TemplateResult | typeof nothing {
     const dev = this.device!;
-    if (dev.type === 'companion') return this._renderCompanionHero();
+    if (dev.type === 'companion') return this._renderCompanionHero(consumed);
     if (dev.type === 'repeater') return this._renderRepeaterHero(consumed);
     return this._renderClientHero(consumed);
   }
 
+  // Managed-device (repeater/client) location is shown as a compact "Loc:"
+  // stat in the card header (devices-page) rather than a hero tile, so it is
+  // not rendered here. The companion keeps its Location hero tile.
   private _renderRepeaterHero(consumed: Set<string>) {
     return html`
       ${this._renderBatteryTile()}
@@ -353,7 +507,6 @@ export class NodeSummary extends LitElement {
       ${this._renderMessagesSentTile(consumed)}
       ${this._renderMessagesReceivedTile(consumed)}
       ${this._renderRequestsTile(consumed)}
-      ${this._renderLocationTile()}
     `;
   }
 
@@ -362,15 +515,24 @@ export class NodeSummary extends LitElement {
       ${this._renderBatteryTile()}
       ${this._renderSignalTile()}
       ${this._renderRequestsTile(consumed)}
-      ${this._renderLocationTile()}
     `;
   }
 
-  private _renderCompanionHero() {
+  // Companion hero mirrors the repeater hero so the locally-attached node
+  // gets the same rich tiles once its self-diagnostic entities exist. Every
+  // tile self-hides when its backing entity is absent, so a companion with
+  // no Self Diagnostics and no battery simply renders no hero tiles. The
+  // battery slot uses _renderBatteryTile directly — it shows the battery
+  // card when a battery is present and renders nothing otherwise (no "USB /
+  // mains" placeholder).
+  private _renderCompanionHero(consumed: Set<string>) {
     return html`
-      ${this._renderMeshNodeCountTile()}
+      ${this._renderBatteryTile()}
+      ${this._renderSignalTile()}
+      ${this._renderCompanionRadioActivityTile()}
+      ${this._renderMessagesSentTile(consumed)}
+      ${this._renderMessagesReceivedTile(consumed)}
       ${this._renderLocationTile()}
-      ${this._renderCompanionPowerTile()}
     `;
   }
 
@@ -530,17 +692,10 @@ export class NodeSummary extends LitElement {
     const totalSent = this._readNumber(nbSent.entity_id);
     const flood = sentFlood ? this._readNumber(sentFlood.entity_id) : 0;
     const direct = sentDirect ? this._readNumber(sentDirect.entity_id) : 0;
-    const other = Math.max(0, totalSent - flood - direct);
     const segs: StackedBarSegment[] = [
       { value: flood,  label: `Flood ${flood}`,   kind: 'flood' },
       { value: direct, label: `Direct ${direct}`, kind: 'direct' },
-      { value: other,  label: `Other ${other}`,   kind: 'other' },
     ];
-    const sentRate = this._readDerivedRate(nbSent.entity_id, 'nb_sent');
-    const rateText = Number.isFinite(sentRate)
-      ? `${sentRate.toFixed(1)} msg/min`
-      : undefined;
-
     consumed.add(nbSent.entity_id);
     if (sentFlood) consumed.add(sentFlood.entity_id);
     if (sentDirect) consumed.add(sentDirect.entity_id);
@@ -552,14 +707,9 @@ export class NodeSummary extends LitElement {
             band: 'info',
             fillPct: 0,
             tooltip:
-              'Messages sent (lifetime). Bar segmented by send mode:\n' +
+              'Messages sent (lifetime), split by send mode:\n' +
               '• Flood — broadcast retransmits visible to all neighbours.\n' +
-              '• Direct — routed point-to-point along a path.\n' +
-              '• Other — any sent packet counted in the total but not ' +
-              'classified (typically 0; the firmware design reconciles ' +
-              'flood + direct with nb_sent). Non-zero "Other" suggests a ' +
-              'firmware version that emits packet types this UI does not ' +
-              'yet recognise.',
+              '• Direct — routed point-to-point along a path.',
           })}</span>
           <span class="status-dot info"></span>
         </div>
@@ -568,8 +718,7 @@ export class NodeSummary extends LitElement {
         </div>
         <meshcore-stacked-bar
           .segments=${segs}
-          .legend=${'inline'}
-          .extraLegendText=${rateText ?? ''}>
+          .legend=${'inline'}>
         </meshcore-stacked-bar>
       </div>
     `;
@@ -586,11 +735,9 @@ export class NodeSummary extends LitElement {
     const totalRecv = this._readNumber(nbRecv.entity_id);
     const flood = recvFlood ? this._readNumber(recvFlood.entity_id) : 0;
     const direct = recvDirect ? this._readNumber(recvDirect.entity_id) : 0;
-    const other = Math.max(0, totalRecv - flood - direct);
     const segs: StackedBarSegment[] = [
       { value: flood,  label: `Flood ${flood}`,   kind: 'flood' },
       { value: direct, label: `Direct ${direct}`, kind: 'direct' },
-      { value: other,  label: `Other ${other}`,   kind: 'other' },
     ];
 
     const fdups = floodDups ? this._readNumber(floodDups.entity_id) : 0;
@@ -600,16 +747,28 @@ export class NodeSummary extends LitElement {
     const dupRatio = totalRecv > 0 ? (totalDups / totalRecv) * 100 : 0;
     // Dup ratio is informational only -- no banding (see iter14 commit).
 
-    const recvRate = this._readDerivedRate(nbRecv.entity_id, 'nb_recv');
-    const rateText = Number.isFinite(recvRate)
-      ? `${recvRate.toFixed(1)} msg/min`
-      : undefined;
-
     consumed.add(nbRecv.entity_id);
     if (recvFlood) consumed.add(recvFlood.entity_id);
     if (recvDirect) consumed.add(recvDirect.entity_id);
     if (floodDups) consumed.add(floodDups.entity_id);
     if (directDups) consumed.add(directDups.entity_id);
+
+    // recv_errors (STATS_PACKETS counter): surfaced as a thin red line in the
+    // bar stack plus an "Error N" legend item -- not a separate table row.
+    // Applies to any node that reports it (companion + managed repeater).
+    // Each bar is a percentage of its OWN total (verified against firmware):
+    //  - errors are CRC failures, DISJOINT from received (RadioLibWrappers:
+    //    n_recv vs n_recv_errors), so the error rate's denominator is all
+    //    reception attempts = received + errors.
+    //  - duplicates are a SUBSET of received, so their denominator is nb_recv.
+    const recvErrorsInfo = this._findEntityIdMatching('recv_errors');
+    const recvErrorsRaw = recvErrorsInfo
+      ? this._readNumber(recvErrorsInfo.entity_id)
+      : NaN;
+    const recvErrorsN = Number.isFinite(recvErrorsRaw) ? recvErrorsRaw : 0;
+    const attempts = totalRecv + recvErrorsN;
+    const errRatio = attempts > 0 ? (recvErrorsN / attempts) * 100 : 0;
+    if (recvErrorsInfo) consumed.add(recvErrorsInfo.entity_id);
 
     return html`
       <div class="hero-tile" @click=${() => this._fireMoreInfo(nbRecv.entity_id)}>
@@ -618,21 +777,18 @@ export class NodeSummary extends LitElement {
             band: 'info',
             fillPct: 0,
             tooltip:
-              'Messages received (lifetime). Bar segmented by receive mode:\n' +
+              'Messages received (lifetime), split by receive mode:\n' +
               '• Flood — broadcast packets received from neighbours.\n' +
-              '• Direct — routed packets where this repeater is on the path.\n' +
-              '• Other — any received packet counted in the total but not ' +
-              'classified (typically 0; nb_recv normally reconciles with ' +
-              'recv_flood + recv_direct). Non-zero "Other" suggests a ' +
-              'firmware version that emits packet types this UI does not ' +
-              'yet recognise.\n\n' +
-              'Duplicates are tracked separately and do NOT contribute to ' +
-              'the total — they appear as an annotation. Dup ratio is ' +
-              'shown for context only, not banded: in a flooding mesh ' +
-              'every active neighbour retransmits the same flood once, so ' +
-              'a 2-neighbour repeater sees roughly 50% dup ratio, a ' +
-              '3-neighbour repeater ~67%, etc. Without knowing the ' +
-              'neighbour count there is no honest threshold to flag.',
+              '• Direct — routed packets where this node is on the path.\n\n' +
+              'Each bar below is a percentage of its own total:\n' +
+              '• Red = receive errors (CRC failures), as a share of all ' +
+              'reception attempts (received + errors) — i.e. the error rate.\n' +
+              '• Amber = duplicate receptions, as a share of received ' +
+              'messages (duplicates are a subset of received).\n\n' +
+              'Both are context only, not banded — in a flooding mesh every ' +
+              'active neighbour retransmits the same flood once, so a high ' +
+              'duplicate ratio is normal (a 2-neighbour repeater sees ~50%, ' +
+              'a 3-neighbour ~67%, etc.).',
           })}</span>
           <span class="status-dot info"></span>
         </div>
@@ -641,16 +797,30 @@ export class NodeSummary extends LitElement {
         </div>
         <meshcore-stacked-bar
           .segments=${segs}
-          .legend=${'inline'}
-          .extraLegendText=${rateText ?? ''}>
+          .legend=${'none'}>
         </meshcore-stacked-bar>
-        ${totalDups > 0
-          ? html`<div class="dup-annotation">
-              + <span class="num">${totalDups}</span>
-              duplicate${totalDups === 1 ? '' : 's'}
-              (${dupRatio.toFixed(1)}% of recv)
+        ${recvErrorsN > 0
+          ? html`<div class="err-line"
+                      title="Receive errors (CRC failures): ${recvErrorsN} — ${errRatio.toFixed(1)}% of reception attempts (received + errors)">
+              <div class="err-line-fill" style="width:${Math.min(100, errRatio).toFixed(1)}%"></div>
             </div>`
           : nothing}
+        ${totalDups > 0
+          ? html`<div class="dup-line"
+                      title="Duplicate receptions: ${totalDups} — ${dupRatio.toFixed(1)}% of received messages">
+              <div class="dup-line-fill" style="width:${Math.min(100, dupRatio).toFixed(1)}%"></div>
+            </div>`
+          : nothing}
+        <div class="msg-legend">
+          <span><span class="msg-swatch flood"></span>Flood ${flood}</span>
+          <span><span class="msg-swatch direct"></span>Direct ${direct}</span>
+          ${recvErrorsN > 0
+            ? html`<span><span class="msg-swatch error"></span>Error ${recvErrorsN}</span>`
+            : nothing}
+          ${totalDups > 0
+            ? html`<span><span class="msg-swatch dup"></span>Dup ${totalDups}</span>`
+            : nothing}
+        </div>
       </div>
     `;
   }
@@ -730,6 +900,11 @@ export class NodeSummary extends LitElement {
     const hasGps = Number.isFinite(latVal) && Number.isFinite(lonVal)
                    && (latVal !== 0 || lonVal !== 0);
 
+    // Nothing to show: no usable coordinates (no GPS entity/fallback, or a
+    // 0,0 placeholder). Hide the tile entirely rather than render an empty
+    // "—" that just wastes hero space.
+    if (!hasGps) return nothing;
+
     // "Updated X ago" timestamp resolution:
     //  - Entity-based location: HA state's `last_updated` (ISO string).
     //  - Fallback location:    `fallbackUpdated` prop (Unix seconds,
@@ -784,31 +959,126 @@ export class NodeSummary extends LitElement {
     return `${Math.floor(deltaSec / 86400)} d ago`;
   }
 
-  private _renderMeshNodeCountTile() {
-    const nodeCount = this._findEntityIdMatching('node_count');
-    const val = nodeCount ? this._readNumber(nodeCount.entity_id) : NaN;
+  // _renderMeshNodeCountTile removed: the companion's added-node count moved
+  // to the Settings-tab device header (next to Firmware / Key) as a compact
+  // "Added nodes" stat — see settings-page.ts.
+
+  // _renderCompanionPowerTile removed: the companion battery slot now uses
+  // _renderBatteryTile directly, which renders nothing when there's no
+  // battery (no "USB / mains" placeholder tile).
+
+  // Radio Activity tile for the companion node. A managed repeater reports
+  // a windowed *_airtime_utilization percentage that _renderRadioActivityTile
+  // consumes directly; the companion exposes only RAW cumulative airtime
+  // (tx_airtime / rx_airtime, minutes) plus uptime. Derive a lifetime-average
+  // duty composition (airtime ÷ uptime) so the companion gets the same tile.
+  // Self-hides when airtime or uptime is absent/unavailable (e.g. Self
+  // Diagnostics disabled upstream), preserving graceful degradation.
+  private _renderCompanionRadioActivityTile() {
+    const txAir = this._findEntityIdMatching('tx_airtime');
+    const rxAir = this._findEntityIdMatching('rx_airtime');
+    const uptimeInfo = this._findByMetric('uptime_hours');
+    if ((!txAir && !rxAir) || !uptimeInfo) return nothing;
+
+    const uptimeMin = this._readUptimeMinutes(uptimeInfo);
+    if (!Number.isFinite(uptimeMin) || uptimeMin <= 0) return nothing;
+
+    const txMin = txAir ? this._readNumber(txAir.entity_id) : 0;
+    const rxMin = rxAir ? this._readNumber(rxAir.entity_id) : 0;
+    // If neither airtime value is readable the tile carries no information.
+    if (!Number.isFinite(txMin) && !Number.isFinite(rxMin)) return nothing;
+
+    const pct = (m: number) =>
+      Number.isFinite(m) ? Math.min(100, Math.max(0, (m / uptimeMin) * 100)) : 0;
+    const txN = pct(txMin);
+    const rxN = pct(rxMin);
+    const idleN = Math.max(0, 100 - txN - rxN);
+
+    // Reuse the repeater airtime-utilisation threshold bands for the dot.
+    const txBand = evaluateSensor('tx_airtime_util', txN).band;
+    const rxBand = evaluateSensor('rx_airtime_util', rxN).band;
+    const dotBand: Band = this._worseBand(txBand, rxBand);
+
+    const segments: StackedBarSegment[] = [
+      { value: txN, label: `TX ${txN.toFixed(1)}%`, kind: 'tx' },
+      { value: rxN, label: `RX ${rxN.toFixed(1)}%`, kind: 'rx' },
+      { value: idleN, label: `Idle ${idleN.toFixed(1)}%`, kind: 'idle' },
+    ];
+
+    const totalUsed = txN + rxN;
+    const onTxClick = (e: Event) => {
+      e.stopPropagation();
+      if (txAir) this._fireMoreInfo(txAir.entity_id);
+    };
+    const onRxClick = (e: Event) => {
+      e.stopPropagation();
+      if (rxAir) this._fireMoreInfo(rxAir.entity_id);
+    };
+
     return html`
       <div class="hero-tile"
-           @click=${() => nodeCount && this._fireMoreInfo(nodeCount.entity_id)}>
-        <div class="hero-tile-head"><span>Mesh nodes</span></div>
+           @click=${() => txAir && this._fireMoreInfo(txAir.entity_id)}>
+        <div class="hero-tile-head">
+          <span>Radio activity${this._renderInfoTip({
+            band: dotBand,
+            fillPct: 0,
+            tooltip: 'Lifetime-average half-duplex composition: cumulative TX / RX ' +
+                     'airtime divided by uptime since the node last booted. The radio ' +
+                     'can transmit OR receive, never both. Unlike a managed repeater ' +
+                     '(which reports utilisation over the last interval), the companion ' +
+                     'exposes only cumulative airtime, so this is a long-run average and ' +
+                     'will not reflect short recent bursts.',
+          })}</span>
+          <span class="status-dot ${dotBand}"></span>
+        </div>
         <div class="hero-tile-value">
-          <span class="primary">${Number.isFinite(val) ? val : '—'}</span>
+          <span class="primary">${totalUsed.toFixed(1)}<span class="unit">%</span></span>
+        </div>
+        <div class="ra-bar-wrap">
+          <meshcore-stacked-bar
+            .segments=${segments}
+            .total=${100}
+            .legend=${'none'}>
+          </meshcore-stacked-bar>
+          <div class="ra-legend">
+            ${txAir
+              ? html`<span class="ra-legend-item" @click=${onTxClick}>
+                  <span class="legend-swatch tx"></span>TX ${txN.toFixed(1)}%
+                </span>`
+              : html`<span class="ra-legend-item">
+                  <span class="legend-swatch tx"></span>TX ${txN.toFixed(1)}%
+                </span>`}
+            ${rxAir
+              ? html`<span class="ra-legend-item" @click=${onRxClick}>
+                  <span class="legend-swatch rx"></span>RX ${rxN.toFixed(1)}%
+                </span>`
+              : html`<span class="ra-legend-item">
+                  <span class="legend-swatch rx"></span>RX ${rxN.toFixed(1)}%
+                </span>`}
+            <span class="ra-legend-item">
+              <span class="legend-swatch idle"></span>Idle ${idleN.toFixed(1)}%
+            </span>
+          </div>
         </div>
       </div>
     `;
   }
 
-  private _renderCompanionPowerTile() {
-    const battery = this._findByMetric('battery_pct');
-    if (battery) return this._renderBatteryTile();
-    return html`
-      <div class="hero-tile">
-        <div class="hero-tile-head"><span>Power</span></div>
-        <div class="hero-tile-value">
-          <span class="primary" style="font-size:16px;">USB / mains</span>
-        </div>
-      </div>
-    `;
+  /** Read an uptime entity's value and normalise to minutes using its
+   *  reported unit (companion uptime is days; other flavours may be h/min/s).
+   *  Mirrors the unit handling in _evaluateForRow's uptime branch. */
+  private _readUptimeMinutes(info: EntityInfo): number {
+    const raw = this._readNumber(info.entity_id);
+    if (!Number.isFinite(raw)) return NaN;
+    const unit = (this.hass?.states[info.entity_id]?.attributes
+                  ?.unit_of_measurement as string) ?? '';
+    switch (unit) {
+      case 'd':   return raw * 1440;
+      case 'h':   return raw * 60;
+      case 'min': return raw;
+      case 's':   return raw / 60;
+      default:    return raw / 60; // assume seconds when the unit is unknown
+    }
   }
 
   // ─── Sensor table grouping ────────────────────────────────────────────
@@ -883,6 +1153,10 @@ export class NodeSummary extends LitElement {
     const eid = info.entity_id;
     const so = info.sortOrder;
 
+    // Radio fault flags (boolean problem sensors) live under Status, which
+    // is not skipped for companion devices.
+    if (info.booleanProblem) return 'Status';
+
     // Power group dropped. Battery (1) is hero-filtered; voltages (2) go
     // to Status (battery_voltage is hero-filtered, leaving Ch1 Voltage etc.).
     if (so === 2) return 'Status';
@@ -907,7 +1181,7 @@ export class NodeSummary extends LitElement {
 
   private _renderGroup(g: { name: GroupName; rows: TemplateResult[] }) {
     return html`
-      <tr class="group-row"><td colspan="4">${g.name}</td></tr>
+      <div class="group-label">${g.name}</div>
       ${g.rows}
     `;
   }
@@ -915,6 +1189,26 @@ export class NodeSummary extends LitElement {
   // ─── Sensor row ───────────────────────────────────────────────────────
 
   private _renderRow(info: EntityInfo) {
+    // Boolean "problem" rows (companion radio fault flags) — show OK /
+    // Detected with a green/red dot instead of a numeric value + bar.
+    if (info.booleanProblem) {
+      const raw = this.hass?.states[info.entity_id]?.state;
+      const unknown = raw === undefined || raw === 'unknown' || raw === 'unavailable';
+      const on = raw === 'on';
+      const band: Band = unknown ? 'info' : (on ? 'bad' : 'good');
+      return html`
+        <div class="sensor-item"
+             @click=${() => this._fireMoreInfo(info.entity_id)}
+             @contextmenu=${(e: MouseEvent) => this._fireContextMenu(e, info)}
+             ${longPress(() => this._fireContextMenu(undefined, info))}>
+          <span class="status-dot ${band}"></span>
+          <span class="si-label">${info.label}</span>
+          <span class="si-value">${unknown ? '—' : on ? 'Detected' : 'OK'}</span>
+          <span class="si-bar"></span>
+        </div>
+      `;
+    }
+
     const value = this._readNumber(info.entity_id);
     const stateObj = this.hass?.states[info.entity_id];
     const unit = (stateObj?.attributes?.unit_of_measurement as string) ?? '';
@@ -937,21 +1231,18 @@ export class NodeSummary extends LitElement {
     const formattedValue = this._formatRowValue(info, value, stateObj?.state);
 
     return html`
-      <tr class="data-row"
-          @click=${() => this._fireMoreInfo(info.entity_id)}
-          @contextmenu=${(e: MouseEvent) => this._fireContextMenu(e, info)}
-          ${longPress(() => this._fireContextMenu(undefined, info))}>
-        <td class="col-status">
-          <span class="status-dot ${band}"></span>
-        </td>
-        <td class="col-label">
-          ${info.label}
-          ${tooltipEv ? this._renderInfoTip(tooltipEv) : nothing}
-        </td>
-        <td class="col-value">
+      <div class="sensor-item"
+           @click=${() => this._fireMoreInfo(info.entity_id)}
+           @contextmenu=${(e: MouseEvent) => this._fireContextMenu(e, info)}
+           ${longPress(() => this._fireContextMenu(undefined, info))}>
+        <span class="status-dot ${band}"></span>
+        <span class="si-label">
+          ${info.label}${tooltipEv ? this._renderInfoTip(tooltipEv) : nothing}
+        </span>
+        <span class="si-value">
           ${formattedValue}${unit ? html`<span class="unit">${unit}</span>` : nothing}
-        </td>
-        <td class="col-bar">
+        </span>
+        <span class="si-bar">
           ${ev && info.metricKey
             ? html`<meshcore-stat-bar
                 .value=${ev.fillPct}
@@ -960,8 +1251,8 @@ export class NodeSummary extends LitElement {
                 .band=${band}>
               </meshcore-stat-bar>`
             : nothing}
-        </td>
-      </tr>
+        </span>
+      </div>
     `;
   }
 
@@ -995,20 +1286,9 @@ export class NodeSummary extends LitElement {
     return evaluateSensor(key, raw);
   }
 
-  /** Read a *_rate sensor's state directly from hass.states (rate sensors
-   *  are excluded from `this.entities` by classify-entity, so we derive
-   *  the rate entity_id from the totals entity_id by inserting `_rate`
-   *  before the device-name suffix). Returns NaN if not present. */
-  private _readDerivedRate(totalsEid: string, key: string): number {
-    // entity_id pattern: sensor.meshcore_<prefix>_<key>_<device-suffix>
-    // rate variant:     sensor.meshcore_<prefix>_<key>_rate_<device-suffix>
-    const rateEid = totalsEid.replace(`_${key}_`, `_${key}_rate_`);
-    if (!this.hass?.states[rateEid]) return NaN;
-    const s = this.hass.states[rateEid].state;
-    if (s === 'unavailable' || s === 'unknown') return NaN;
-    const n = parseFloat(s);
-    return Number.isFinite(n) ? n : NaN;
-  }
+  // _readDerivedRate removed: the per-tile msg/min text is gone (rates now
+  // live in the 48h Message activity chart, which reads recorder statistics
+  // for the *_rate sensors via _fetchRateHistory / _deriveRateId).
 
   // Traffic composite logic moved to the hero tile renderers
   // (_renderMessagesSentTile / _renderMessagesReceivedTile /

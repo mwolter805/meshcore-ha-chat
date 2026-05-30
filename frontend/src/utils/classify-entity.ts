@@ -38,6 +38,10 @@ export interface EntityInfo {
    *  ⓘ icon (e.g., Temperature -- ambient context-dependent, no band).
    *  When a metricKey is set, evaluateSensor's tooltip wins. */
   staticTooltip?: string;
+  /** True for boolean "problem" binary_sensors (the companion's radio
+   *  fault flags). node-summary renders these as OK/Detected rows with a
+   *  green/red dot rather than a numeric value + bar. */
+  booleanProblem?: boolean;
 }
 
 export interface MeshcoreRegistryResult {
@@ -64,6 +68,20 @@ export function classifyEntity(entity: any): EntityInfo | null {
                          ?? entity.device_class
                          ?? entity._stateDeviceClass
                          ?? null;
+
+  // --- Step 0: allow the companion's self-diagnostic radio fault flags ---
+  // These are `problem` binary_sensors decoded from the STATS_CORE error
+  // bitmask (companion-only). They must be allow-listed BEFORE the blanket
+  // meshcore binary_sensor exclusion in Step 1. Latching since boot; rendered
+  // as OK/Detected rows (booleanProblem) and grouped under Status.
+  if (eid.startsWith('binary_sensor.meshcore_')
+      && /_err_(pool_full|cad_timeout|rx_timeout)_/.test(eid)) {
+    const label = eid.includes('err_pool_full') ? 'Radio Fault: Packet Pool'
+                : eid.includes('err_cad_timeout') ? 'Radio Fault: CAD Timeout'
+                : 'Radio Fault: RX-Start Timeout';
+    return { entity_id: eid, label, icon: 'alert',
+             colorScheme: 'neutral', sortOrder: 13, booleanProblem: true };
+  }
 
   // --- Step 1: exclude peer-contact binary_sensors ---
   // All meshcore binary_sensors today are contact-discovery entities with

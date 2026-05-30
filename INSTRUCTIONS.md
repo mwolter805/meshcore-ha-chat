@@ -15,7 +15,7 @@ The panel lives in the HA sidebar under **MeshCore Chat**. It opens to the **Cha
 - **Chat** — channels, DMs, message history, cross-conversation search, and per-message route popups (click any message bubble for Copy / Reply, plus the route metadata: hop sequence, SNR, RSSI, and exact receive timestamp).
 - **Devices** — per-device sensor cards for every managed repeater and client, plus action buttons (Flood Advert, Sync Clock, Req Telemetry, Req Status, Issue Command, Reboot).
 - **Nodes** — full network discovery view. Every node the companion has heard, filterable by Added vs Discovered and by node type.
-- **Settings** — your companion's profile, radio configuration, location source, identity, and a local Issue Command launcher.
+- **Settings** — your companion's profile, radio configuration, location source, identity, and a local Issue Command launcher. The companion card shows the same rich sensor tiles managed devices get (battery, signal, radio activity, message counts) plus a diagnostics table — but only once you enable **Self Diagnostics** in the upstream meshcore integration's options (it's off by default; the tiles self-hide until then). Those entities are created by the upstream integration; the chat panel only renders them.
 
 The header carries a device switcher (when more than one upstream `meshcore` config entry is present) plus a connection status indicator. If the badge says **Offline**, the companion radio isn't talking to HA — fix that in the upstream integration before the chat panel can do anything useful.
 
@@ -248,6 +248,19 @@ To refresh:
 The chat panel will pick up the new value on next refresh of the Devices tab (within ~30 s, or immediately if you switch tabs).
 
 This is a limitation of the upstream integration, not the chat panel — the panel only displays what HA already knows. A future change to `meshcore-ha` could add `ver` to the periodic poll cycle and make this automatic.
+
+### A managed client shows offline or reports no battery/telemetry
+
+A managed client's card stays **offline** (its Online sensor never leaves `unknown`) and shows no battery or telemetry, even though you can send and receive chat messages with that contact. Messaging and telemetry are different request types: companion ("Pocket") clients reply to chat messages by default, but only answer **telemetry** requests when telemetry is enabled *and* your companion node is permitted to request it. Repeaters answer by default; plain clients don't — so a brand-new managed client commonly looks "offline" until you turn this on.
+
+The fix is on the client device itself, in its MeshCore app:
+
+1. Enable **telemetry**, so the device has something to report.
+2. Allow your companion node to **request telemetry** — the device's permission/ACL for who may poll it.
+
+Once both are set, the next poll succeeds: the Online sensor flips to **on**, battery and telemetry sensors appear on the card, and the **Req Telemetry** button on the Devices tab returns data instead of timing out. To retry immediately instead of waiting for the next poll cycle, reload the upstream integration at **Settings → Devices & Services → MeshCore → ⋮ → Reload**.
+
+This is a property of the remote device, not a stale entity or stale config in Home Assistant — removing and re-adding the client doesn't change it.
 
 ### Showing a sensor you previously hid
 

@@ -2,6 +2,12 @@
 
 All notable changes to **MeshCore Chat for Home Assistant** are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/) loosely; entries are most-recent-first.
 
+## [Unreleased]
+
+### Added
+
+- **Rich companion device card.** The Settings-tab companion card now renders the same hero tiles managed repeaters/clients get — battery (or USB/mains), signal (RSSI · SNR), radio activity, and message-sent/received counts — plus a diagnostics sensor table (noise floor, TX queue) and the radio fault flags (Packet Pool / CAD Timeout / RX-Start Timeout) shown as OK/Detected problem rows. The radio-activity tile is derived from the companion's cumulative TX/RX airtime divided by uptime (a lifetime average, since the companion exposes raw airtime rather than the windowed utilisation a repeater reports), and the Messages Received tile annotates the RX error rate from `recv_errors`. The tiles self-hide when their entities are absent, so the card is unchanged unless **Self Diagnostics** is enabled in the upstream meshcore integration. These entities are created by the upstream integration; the chat panel only renders them.
+
 ## [0.2.1] - 2026-05-16
 
 ### Fixed

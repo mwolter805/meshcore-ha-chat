@@ -918,6 +918,17 @@ export class SettingsPage extends LitElement {
     const entities = this._getCompanionEntities();
     const hiddenCount = (this._hiddenSensors[deviceKey] || []).length;
 
+    // Added-node count shown as a compact header stat (was a hero tile).
+    const nodeCountInfo = entities.find((e) => e.entity_id.includes('node_count'));
+    const addedNodesState = nodeCountInfo
+      ? this.hass?.states[nodeCountInfo.entity_id]?.state
+      : undefined;
+    const addedNodes = addedNodesState
+      && addedNodesState !== 'unavailable'
+      && addedNodesState !== 'unknown'
+      ? addedNodesState
+      : undefined;
+
     return html`
       <div class="device-section" @tile-context-menu=${(e: CustomEvent) => this._onTileContextMenu(e, deviceKey)}>
         <div class="companion-header">
@@ -931,6 +942,9 @@ export class SettingsPage extends LitElement {
                 <span>Companion</span>
                 <span>Firmware: ${d.firmware || 'unknown'}</span>
                 <span>Key: ${d.pubkey_prefix}</span>
+                ${addedNodes !== undefined
+                  ? html`<span>Added nodes: ${addedNodes}</span>`
+                  : nothing}
               </div>
             </div>
           </div>
@@ -959,7 +973,6 @@ export class SettingsPage extends LitElement {
         <div class="actions-row">
           <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeCompanionAction('send_advert', undefined, 'Local Advert')}>Local Advert</button>
           <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeCompanionAction('send_advert', {flood: true}, 'Flood Advert')}>Flood Advert</button>
-          <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeCompanionAction('get_bat', undefined, 'Get Battery')}>Get Battery</button>
           <button class="action-btn" ?disabled=${!isOnline} @click=${() => this._executeCompanionAction('set_time', {val: Math.floor(Date.now() / 1000)}, 'Sync Clock')}>Sync Clock</button>
           <button class="action-btn" ?disabled=${!isOnline} @click=${this._onCompanionTrace}>Trace</button>
         </div>
