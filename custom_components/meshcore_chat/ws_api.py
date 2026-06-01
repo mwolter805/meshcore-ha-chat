@@ -2330,17 +2330,33 @@ async def ws_add_contact(hass, connection, msg):
                     return_response=True,
                 )
             except Exception as ex:
-                _ws_send_error_safe(
-                    connection, msg["id"], ex, handler="ws_add_contact"
-                )
-                return
-            # execute_command returns the SDK result payload (or None when the
-            # result carried no payload — including a bodyless OK). A radio-side
-            # failure surfaces as a dict carrying a failure marker: "reason"
+                # execute_command returns None for a bodyless-OK SDK result (an
+                # Event with empty payload). HA's return_response=True path then
+                # rejects that None with a "service_reponse_invalid" error before
+                # it reaches us. That rejection means the command succeeded with
+                # no payload — the integration's add_contact handler already did
+                # the node + coordinator + entity work — so map it to an empty
+                # response and fall through to the success path. Any other
+                # exception is a real failure. (translation_key is HA-internal;
+                # if HA renames it the worst case is the pre-workaround error
+                # resurfaces, never a hidden real failure.)
+                if getattr(ex, "translation_key", None) in (
+                    "service_reponse_invalid",
+                    "service_response_invalid",
+                ):
+                    response = {}
+                else:
+                    _ws_send_error_safe(
+                        connection, msg["id"], ex, handler="ws_add_contact"
+                    )
+                    return
+            # On the success path execute_command returns the SDK result payload
+            # (or {} for a bodyless OK, normalized in the except above). A radio-
+            # side failure surfaces as a dict carrying a failure marker: "reason"
             # (timeout / no_event_received), "error_code" (device-reported
             # error), or "error" (exception string). Map those to the same
-            # command_failed the inlined path returns. A None or marker-less
-            # payload is treated as success.
+            # command_failed the inlined path returns. A marker-less payload
+            # (including {}) is treated as success.
             if isinstance(response, dict) and (
                 "reason" in response
                 or "error_code" in response
@@ -2451,17 +2467,33 @@ async def ws_remove_contact(hass, connection, msg):
                     return_response=True,
                 )
             except Exception as ex:
-                _ws_send_error_safe(
-                    connection, msg["id"], ex, handler="ws_remove_contact"
-                )
-                return
-            # execute_command returns the SDK result payload (or None when the
-            # result carried no payload — including a bodyless OK). A radio-side
-            # failure surfaces as a dict carrying a failure marker: "reason"
+                # execute_command returns None for a bodyless-OK SDK result (an
+                # Event with empty payload). HA's return_response=True path then
+                # rejects that None with a "service_reponse_invalid" error before
+                # it reaches us. That rejection means the command succeeded with
+                # no payload — the integration's remove_contact handler already
+                # did the node + coordinator + entity work — so map it to an
+                # empty response and fall through to the success path. Any other
+                # exception is a real failure. (translation_key is HA-internal;
+                # if HA renames it the worst case is the pre-workaround error
+                # resurfaces, never a hidden real failure.)
+                if getattr(ex, "translation_key", None) in (
+                    "service_reponse_invalid",
+                    "service_response_invalid",
+                ):
+                    response = {}
+                else:
+                    _ws_send_error_safe(
+                        connection, msg["id"], ex, handler="ws_remove_contact"
+                    )
+                    return
+            # On the success path execute_command returns the SDK result payload
+            # (or {} for a bodyless OK, normalized in the except above). A radio-
+            # side failure surfaces as a dict carrying a failure marker: "reason"
             # (timeout / no_event_received), "error_code" (device-reported
             # error), or "error" (exception string). Map those to the same
-            # command_failed the inlined path returns. A None or marker-less
-            # payload is treated as success.
+            # command_failed the inlined path returns. A marker-less payload
+            # (including {}) is treated as success.
             if isinstance(response, dict) and (
                 "reason" in response
                 or "error_code" in response

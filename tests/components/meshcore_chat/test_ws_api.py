@@ -3161,6 +3161,70 @@ async def test_ws_remove_contact_routed_error_code_maps_command_failed(
     assert conn.errors and conn.errors[0][1] == "command_failed"
 
 
+async def test_ws_remove_contact_routed_bodyless_ok_treated_as_success(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Gate open: a bodyless-OK remove makes execute_command return None, which
+    HA's return_response=True path rejects with a HomeAssistantError
+    (translation_key="service_reponse_invalid") BEFORE the response reaches the
+    chat. The chat must treat that rejection as success — the integration's
+    handler already did the node + entity work. Regression for the live error
+    the None-returning mock in the sibling routed test did not reproduce.
+    ws_add_contact shares this exact except handler."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    coordinator._contacts = {_RC_PREFIX: {"public_key": _RC_FULL_PK}}
+
+    async def _fake_call(*args, **kwargs):
+        raise HomeAssistantError(translation_key="service_reponse_invalid")
+
+    with (
+        patch("homeassistant.core.ServiceRegistry.has_service", return_value=True),
+        patch(
+            "homeassistant.core.ServiceRegistry.async_call", side_effect=_fake_call
+        ),
+    ):
+        conn = _Connection()
+        await _call_ws(
+            ws_api.ws_remove_contact,
+            hass,
+            conn,
+            {"id": 1, "entry_id": "meshcore_entry", "public_key": _RC_FULL_PK},
+        )
+
+    assert conn.results == [(1, {"success": True})]
+    assert not conn.errors
+
+
+async def test_ws_remove_contact_routed_real_error_still_fails(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Gate open: a non-response-validation exception from the service call is
+    still surfaced as an error (the bodyless-OK workaround must not swallow real
+    failures)."""
+    coordinator._contacts = {_RC_PREFIX: {"public_key": _RC_FULL_PK}}
+
+    async def _fake_call(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    with (
+        patch("homeassistant.core.ServiceRegistry.has_service", return_value=True),
+        patch(
+            "homeassistant.core.ServiceRegistry.async_call", side_effect=_fake_call
+        ),
+    ):
+        conn = _Connection()
+        await _call_ws(
+            ws_api.ws_remove_contact,
+            hass,
+            conn,
+            {"id": 1, "entry_id": "meshcore_entry", "public_key": _RC_FULL_PK},
+        )
+
+    assert not conn.results
+    assert conn.errors
+
+
 async def test_ws_remove_contact_inlined_fallback_when_gate_closed(
     hass: HomeAssistant, coordinator: MagicMock
 ) -> None:
