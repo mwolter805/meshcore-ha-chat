@@ -80,6 +80,13 @@ export const REMOTE_COMMANDS: CommandDef[] = [
     remoteOnly: true,
   },
   {
+    name: 'get dutycycle',
+    description: 'Get TX duty cycle as a percentage (v1.15.0+)',
+    category: 'Radio Settings',
+    responseFormat: '> NN.N%   (example: > 33.3%)',
+    remoteOnly: true,
+  },
+  {
     name: 'get lat',
     description: 'Get latitude coordinate',
     category: 'Location',
@@ -129,6 +136,20 @@ export const REMOTE_COMMANDS: CommandDef[] = [
     remoteOnly: true,
   },
   {
+    name: 'get flood.max.unscoped',
+    description: 'Get max flood hops for un-scoped packets (v1.16.0+)',
+    category: 'Network',
+    responseFormat: '> max hops value (example: 64)',
+    remoteOnly: true,
+  },
+  {
+    name: 'get flood.max.advert',
+    description: 'Get max flood hops for adverts (v1.16.0+)',
+    category: 'Network',
+    responseFormat: '> max hops value (example: 8)',
+    remoteOnly: true,
+  },
+  {
     name: 'get advert.interval',
     description: 'Get local advertisement interval (minutes)',
     category: 'Network',
@@ -139,7 +160,7 @@ export const REMOTE_COMMANDS: CommandDef[] = [
     name: 'get flood.advert.interval',
     description: 'Get flood advertisement interval (hours)',
     category: 'Network',
-    responseFormat: '> interval in hours (example: 12)',
+    responseFormat: '> interval in hours (example: 47; firmware default 47 since v1.16.0)',
     remoteOnly: true,
   },
   {
@@ -228,7 +249,7 @@ export const REMOTE_COMMANDS: CommandDef[] = [
   },
   {
     name: 'get radio.rxgain',
-    description: 'Get RX boosted gain mode (SX1262/SX1268 only, v1.14.1+)',
+    description: 'Get RX boosted gain mode (SX1262/SX1268; also LR1110 v1.16.0+)',
     category: 'Radio Settings',
     responseFormat: '> on or off',
     remoteOnly: true,
@@ -274,6 +295,23 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       },
     ],
     responseFormat: 'OK - airtime factor set',
+    remoteOnly: true,
+  },
+  {
+    name: 'set dutycycle',
+    description: 'Set TX duty cycle as a percentage (v1.15.0+, alias for set af)',
+    category: 'Radio Settings',
+    params: [
+      {
+        name: 'pct',
+        type: 'number',
+        description: 'Duty cycle percentage (1-100). Firmware converts to airtime_factor = (100/pct) - 1.',
+        required: true,
+        min: 1,
+        max: 100,
+      },
+    ],
+    responseFormat: 'OK - NN.N%',
     remoteOnly: true,
   },
   {
@@ -366,9 +404,10 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       {
         name: 'val',
         type: 'number',
-        description: 'RX delay value (≥0)',
+        description: 'RX delay base in seconds (0-20, v1.16.0+ upper bound)',
         required: true,
         min: 0,
+        max: 20,
       },
     ],
     responseFormat: 'OK - RX delay set',
@@ -382,9 +421,10 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       {
         name: 'val',
         type: 'number',
-        description: 'TX delay value (≥0)',
+        description: 'TX delay factor (0-2, v1.16.0+ upper bound)',
         required: true,
         min: 0,
+        max: 2,
       },
     ],
     responseFormat: 'OK - TX delay set',
@@ -398,9 +438,10 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       {
         name: 'val',
         type: 'number',
-        description: 'Direct TX delay value (≥0)',
+        description: 'Direct TX delay factor (0-2, v1.16.0+ upper bound)',
         required: true,
         min: 0,
+        max: 2,
       },
     ],
     responseFormat: 'OK - direct TX delay set',
@@ -421,6 +462,40 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       },
     ],
     responseFormat: 'OK - flood max set',
+    remoteOnly: true,
+  },
+  {
+    name: 'set flood.max.unscoped',
+    description: 'Set max flood hops for un-scoped packets (v1.16.0+)',
+    category: 'Network',
+    params: [
+      {
+        name: 'val',
+        type: 'number',
+        description: 'Max hops (0-64)',
+        required: true,
+        min: 0,
+        max: 64,
+      },
+    ],
+    responseFormat: 'OK',
+    remoteOnly: true,
+  },
+  {
+    name: 'set flood.max.advert',
+    description: 'Set max flood hops for adverts (v1.16.0+)',
+    category: 'Network',
+    params: [
+      {
+        name: 'val',
+        type: 'number',
+        description: 'Max hops (0-64)',
+        required: true,
+        min: 0,
+        max: 64,
+      },
+    ],
+    responseFormat: 'OK',
     remoteOnly: true,
   },
   {
@@ -624,7 +699,7 @@ export const REMOTE_COMMANDS: CommandDef[] = [
   },
   {
     name: 'set radio.rxgain',
-    description: 'Set RX boosted gain mode (SX1262/SX1268 only, v1.14.1+)',
+    description: 'Set RX boosted gain mode (SX1262/SX1268; also LR1110 v1.16.0+)',
     category: 'Radio Settings',
     params: [
       {
@@ -958,6 +1033,171 @@ export const REMOTE_COMMANDS: CommandDef[] = [
       },
     ],
     responseFormat: 'OK - temp params for N mins',
+    remoteOnly: true,
+  },
+
+  // ========================
+  // Regions (v1.15.0+)
+  // ========================
+  {
+    name: 'region',
+    description: 'Export the device region map (v1.15.0+)',
+    category: 'Regions',
+    responseFormat: 'Comma-separated region list (up to 160 chars)',
+    remoteOnly: true,
+  },
+  {
+    name: 'region def',
+    description: 'Bulk-define the region map in one command (v1.16.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'spec',
+        type: 'string',
+        description: 'Space-separated region tokens; each is name, name|jump, or name,jump (| or , redirects nesting to the jump region). Example: socal cencal|socal norcal',
+        required: true,
+      },
+    ],
+    responseFormat: 'Exported region map, or "Err - <reason>"',
+    remoteOnly: true,
+  },
+  {
+    name: 'region load',
+    description: 'Reload regions from persistent storage (v1.15.0+)',
+    category: 'Regions',
+    remoteOnly: true,
+  },
+  {
+    name: 'region save',
+    description: 'Persist current region map to storage (v1.15.0+)',
+    category: 'Regions',
+    responseFormat: 'OK or "Err - save failed"',
+    remoteOnly: true,
+  },
+  {
+    name: 'region get',
+    description: 'Show one region (name, parent, allow/deny-flood flag) (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Region name (prefix match)',
+        required: true,
+      },
+    ],
+    responseFormat: ' <name> [(parent)] [F]   (F = flood allowed)',
+    remoteOnly: true,
+  },
+  {
+    name: 'region put',
+    description: 'Create a region (flood allowed by default) (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Region name',
+        required: true,
+      },
+      {
+        name: 'parent',
+        type: 'string',
+        description: 'Parent region name (optional, defaults to wildcard)',
+        required: false,
+      },
+    ],
+    responseFormat: 'OK - (flood allowed)',
+    remoteOnly: true,
+  },
+  {
+    name: 'region remove',
+    description: 'Remove a region (must be empty) (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Region name (exact match)',
+        required: true,
+      },
+    ],
+    responseFormat: 'OK / "Err - not empty" / "Err - not found"',
+    remoteOnly: true,
+  },
+  {
+    name: 'region list',
+    description: 'List regions filtered by flood permission (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'filter',
+        type: 'select',
+        description: 'allowed = flood-permitted regions; denied = flood-blocked regions',
+        required: true,
+        options: ['allowed', 'denied'],
+      },
+    ],
+    remoteOnly: true,
+  },
+  {
+    name: 'region home',
+    description: 'Get (no arg) or set (with arg) the home region (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Leave empty to read current home; provide a region name (prefix match) to set',
+        required: false,
+      },
+    ],
+    responseFormat: ' home is [now] <name>',
+    remoteOnly: true,
+  },
+  {
+    name: 'region default',
+    description: 'Get (no arg) or set (with arg) the default flood scope region (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Leave empty to read current default; provide a region name to set, or <null> to clear',
+        required: false,
+      },
+    ],
+    responseFormat: ' default scope is [now] <name|<null>>',
+    remoteOnly: true,
+  },
+  {
+    name: 'region allowf',
+    description: 'Allow flood for a region (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Region name (prefix match)',
+        required: true,
+      },
+    ],
+    responseFormat: 'OK',
+    remoteOnly: true,
+  },
+  {
+    name: 'region denyf',
+    description: 'Deny flood for a region (v1.15.0+)',
+    category: 'Regions',
+    params: [
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Region name (prefix match)',
+        required: true,
+      },
+    ],
+    responseFormat: 'OK',
     remoteOnly: true,
   },
 ];

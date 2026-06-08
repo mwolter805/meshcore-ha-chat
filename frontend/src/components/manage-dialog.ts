@@ -20,6 +20,21 @@ export class ManageDialog extends LitElement {
   @property({ type: Object }) hass?: HomeAssistant;
   @property({ type: String }) entryId?: string;
   @property({ type: Boolean }) narrow = false;
+  /** Tab to show on open (default 'contacts'). The chat header's
+   * scope chip opens the dialog on 'channels' so the user lands on
+   * the channel whose scope they tapped. */
+  @property({ type: String }) initialTab?: ManageTab;
+
+  private _tabInitialized = false;
+
+  willUpdate() {
+    if (!this._tabInitialized) {
+      this._tabInitialized = true;
+      if (this.initialTab) {
+        this._activeTab = this.initialTab;
+      }
+    }
+  }
 
   constructor() {
     super();
@@ -621,6 +636,7 @@ export class ManageDialog extends LitElement {
               .editMode=${!!this._editingChannel}
               .initialChannelIdx=${this._editingChannel?.channel_idx ?? 0}
               .initialChannelName=${this._editingChannel?.name ?? ''}
+              .initialScope=${this._editingChannel?.scope ?? ''}
               .availableIndices=${this._getAvailableIndices()}
               @channel-saved=${this._onChannelSaved}
               @close=${() => { this._channelDialogOpen = false; this._editingChannel = null; }}
@@ -731,7 +747,9 @@ export class ManageDialog extends LitElement {
             <div class="channel-icon">#</div>
             <div class="channel-info">
               <div class="channel-name">${channel.name}</div>
-              <div class="channel-idx">Index ${channel.channel_idx}</div>
+              <div class="channel-idx">Index ${channel.channel_idx}${channel.scope
+                ? html` · scope: ${channel.scope}`
+                : ''}</div>
             </div>
             ${confirming
               ? html`

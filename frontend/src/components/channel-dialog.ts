@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant } from '../types';
-import { setChannel } from '../api';
+import { setChannel, getFloodScopes } from '../api';
 import { panelStyles } from '../styles';
 import { attachDialogA11y } from '../utils/dialog-a11y';
 
@@ -21,12 +21,20 @@ export class ChannelDialog extends LitElement {
   @property({ type: Boolean }) editMode = false;
   @property({ type: Number }) initialChannelIdx = 0;
   @property({ type: String }) initialChannelName = '';
+  @property({ type: String }) initialScope = '';
   @property({ type: Array }) availableIndices: number[] = [];
 
   @state() private _channelIdx = 0;
   @state() private _channelName = '';
   @state() private _customKey = '';
   @state() private _autoKey = true;
+  @state() private _scope = '';
+  // Region-scope allowlist from the upstream integration's Global
+  // Settings. null = fetch in flight; [] = none configured (the
+  // empty-state hint renders). Re-fetched on every dialog open so a
+  // user who adds scopes upstream and returns sees them without an
+  // HA restart.
+  @state() private _availableScopes: string[] | null = null;
   @state() private _saving = false;
   @state() private _error: string | null = null;
 
@@ -74,15 +82,26 @@ export class ChannelDialog extends LitElement {
       if (this.editMode) {
         this._channelIdx = this.initialChannelIdx;
         this._channelName = this.initialChannelName;
+        this._scope = this.initialScope;
       } else {
         // Default to first available index
         this._channelIdx = this.availableIndices.length > 0 ? this.availableIndices[0] : 0;
       }
       this._initialized = true;
+      void this._loadScopes();
     }
     if (changedProps.has('open') && !this.open) {
       this._initialized = false;
     }
+  }
+
+  private async _loadScopes() {
+    this._availableScopes = null;
+    if (!this.hass) {
+      this._availableScopes = [];
+      return;
+    }
+    this._availableScopes = await getFloodScopes(this.hass, this.entryId);
   }
 
   render() {
@@ -145,6 +164,12 @@ export class ChannelDialog extends LitElement {
                 }}
               />
               <div class="form-description">Friendly name for the channel</div>
+            </div>
+
+            <!-- Region Scope -->
+            <div class="form-group">
+              <label class="form-label">Region scope</label>
+              ${this._renderScopeField()}
             </div>
 
             <!-- Auto Key Toggle -->
@@ -210,6 +235,71 @@ export class ChannelDialog extends LitElement {
     `;
   }
 
+  /**
+   * Region-scope selector. Sourced from the upstream meshcore
+   * integration's Global Settings allowlist (meshcore-dev/meshcore-ha
+   * #250). When the allowlist is empty the select is disabled and an
+   * inline hint explains where scope names come from — required for
+   * HA-only setups, where the firmware's region auto-discovery isn't
+   * reachable through the companion protocol.
+   */
+  private _renderScopeField() {
+    const scopes = this._availableScopes;
+    if (scopes === null) {
+      return html`
+        <select class="form-select scope-select" disabled>
+          <option selected>Loading…</option>
+        </select>
+      `;
+    }
+
+    // A persisted scope that has since been removed from the upstream
+    // allowlist stays selectable, so editing the channel shows its real
+    // state and saving doesn't silently drop the scope.
+    const orphaned = !!this._scope && !scopes.includes(this._scope);
+
+    if (scopes.length === 0 && !orphaned) {
+      return html`
+        <select class="form-select scope-select" disabled>
+          <option selected>No scope (global flood)</option>
+        </select>
+        <div class="form-description scope-empty-hint">
+          No region scopes are configured yet. Add scope names in the
+          <a
+            href="/config/integrations/integration/meshcore"
+            target="_blank"
+            rel="noopener">MeshCore integration</a>
+          first (Configure → Global Settings → Flood Scope Allowlist),
+          then reopen this dialog. Region names are agreed within your
+          local mesh community — check your community's reference, or
+          scan for nearby regions from the MeshCore mobile app.
+        </div>
+      `;
+    }
+
+    return html`
+      <select
+        class="form-select scope-select"
+        @change=${(e: Event) => {
+          this._scope = (e.target as HTMLSelectElement).value;
+        }}>
+        <option value="" ?selected=${!this._scope}>No scope (global flood)</option>
+        ${orphaned
+          ? html`<option value=${this._scope} selected>${this._scope} (not in allowlist)</option>`
+          : ''}
+        ${scopes.map(
+          (s) => html`
+            <option value=${s} ?selected=${s === this._scope}>${s}</option>
+          `,
+        )}
+      </select>
+      <div class="form-description">
+        Send this channel's messages only through repeaters configured
+        for the selected region. The default floods the whole mesh.
+      </div>
+    `;
+  }
+
   private async _onSave() {
     if (!this.hass || !this._channelName) {
       return;
@@ -225,6 +315,8 @@ export class ChannelDialog extends LitElement {
         this._channelName,
         this._autoKey ? undefined : this._customKey,
         this.entryId,
+        // Always sent: '' clears a previously persisted scope.
+        this._scope,
       );
 
       if (result.success) {
@@ -233,6 +325,7 @@ export class ChannelDialog extends LitElement {
             detail: {
               channelIdx: this._channelIdx,
               name: this._channelName,
+              scope: this._scope,
             },
             bubbles: true,
           }),
@@ -264,6 +357,8 @@ export class ChannelDialog extends LitElement {
     this._channelName = '';
     this._customKey = '';
     this._autoKey = true;
+    this._scope = '';
+    this._availableScopes = null;
     this._error = null;
   }
 }

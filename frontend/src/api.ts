@@ -77,6 +77,7 @@ export async function sendChannelMessage(
   channelIdx: number,
   message: string,
   entryId?: string,
+  scope?: string,
 ): Promise<void> {
   try {
     const data: Record<string, unknown> = {
@@ -84,6 +85,10 @@ export async function sendChannelMessage(
       message,
     };
     if (entryId) data.entry_id = entryId;
+    // Per-channel region scope. The upstream service sets the flood
+    // scope, sends, and resets it afterward (meshcore-dev/meshcore-ha
+    // #250), so no scope state lingers on the radio between sends.
+    if (scope) data.scope = scope;
     await hass.callService('meshcore', 'send_channel_message', data);
   } catch (error) {
     throw new Error(`Failed to send channel message: ${String(error)}`);
@@ -276,7 +281,12 @@ export async function executeRemote(
 }
 
 /**
- * Set channel configuration
+ * Set channel configuration.
+ *
+ * `scope` is the per-channel region scope. It is sent whenever defined
+ * — including as an empty string, which clears any persisted scope —
+ * and omitted only when the caller leaves it `undefined` (existing
+ * scope untouched).
  */
 export async function setChannel(
   hass: HomeAssistant,
@@ -284,6 +294,7 @@ export async function setChannel(
   name: string,
   key?: string,
   entryId?: string,
+  scope?: string,
 ): Promise<{ success: boolean }> {
   try {
     const msg: Record<string, unknown> = {
@@ -293,10 +304,32 @@ export async function setChannel(
     };
     if (key) msg.key = key;
     if (entryId) msg.entry_id = entryId;
+    if (scope !== undefined) msg.scope = scope;
     const result = await hass.callWS<{ success: boolean }>(msg);
     return result;
   } catch {
     return { success: false };
+  }
+}
+
+/**
+ * Region-scope allowlist from the upstream meshcore integration's
+ * Global Settings. Empty when the allowlist is unconfigured or when
+ * the installed meshcore predates the scope feature
+ * (meshcore-dev/meshcore-ha#250) — the channel dialog shows setup
+ * guidance in that case.
+ */
+export async function getFloodScopes(
+  hass: HomeAssistant,
+  entryId?: string,
+): Promise<string[]> {
+  try {
+    const msg: Record<string, unknown> = { type: 'meshcore_chat/get_flood_scopes' };
+    if (entryId) msg.entry_id = entryId;
+    const result = await hass.callWS<{ scopes: string[] }>(msg);
+    return result.scopes || [];
+  } catch {
+    return [];
   }
 }
 

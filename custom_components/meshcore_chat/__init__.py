@@ -40,6 +40,7 @@ from .const import (
     EVENT_MESHCORE_MESSAGE,
     MESHCORE_DOMAIN,
 )
+from .channel_scopes import ChannelScopeStore
 from .message_store import MessageStore
 from .panel import async_register_panel, async_remove_panel
 from .unread_tracking import EVENT_UNREAD_UPDATED, UnreadTracker
@@ -194,6 +195,16 @@ async def async_setup_entry(
         tracker = UnreadTracker(hass, entry.entry_id)
         await tracker.async_load()
         bucket["unread_tracker"] = tracker
+
+    # Per-channel region-scope store is likewise a process-wide singleton.
+    # Scopes are keyed inside the store by (upstream meshcore entry_id,
+    # channel index), so one instance serves every upstream coordinator on
+    # multi-entry setups. Hydrated here so ws_get_channels sees persisted
+    # scopes on first connect.
+    if "channel_scopes" not in bucket:
+        scopes = ChannelScopeStore(hass)
+        await scopes.async_load()
+        bucket["channel_scopes"] = scopes
 
     # Register WS commands once (idempotent registration would be ideal but
     # HA's websocket_api raises on duplicate types — guard with a flag on the

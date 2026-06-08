@@ -229,6 +229,13 @@ export interface Channel {
   channel_idx: number;
   name: string;
   settings: Record<string, unknown>;
+  /**
+   * Persisted per-channel region scope. Threaded into
+   * `meshcore.send_channel_message`'s `scope` argument on each send so
+   * the message floods only through repeaters configured for that
+   * region. Absent = no scope (legacy global flood).
+   */
+  scope?: string;
 }
 
 /**

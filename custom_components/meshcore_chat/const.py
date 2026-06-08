@@ -23,6 +23,15 @@ MESHCORE_DOMAIN: Final = "meshcore"
 # `ws_set_device_config` in ws_api.py.
 CONF_NAME_UPSTREAM: Final = "name"
 
+# Upstream meshcore config-entry data key holding the comma-separated
+# region-scope allowlist the user maintains in the integration's Global
+# Settings. Mirrors meshcore-ha/custom_components/meshcore/const.py:
+# CONF_FLOOD_SCOPES (literal "flood_scopes") — same lifted-literal
+# rationale as CONF_NAME_UPSTREAM above. The key was added upstream by
+# meshcore-dev/meshcore-ha#250 and is absent on older meshcore
+# versions; consumers treat absence as "no scopes available".
+CONF_FLOOD_SCOPES_UPSTREAM: Final = "flood_scopes"
+
 # Events fired on hass.bus by the upstream meshcore integration that we
 # subscribe to from __init__.py.
 EVENT_MESHCORE_MESSAGE: Final = "meshcore_message"

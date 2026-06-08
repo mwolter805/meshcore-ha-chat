@@ -85,9 +85,9 @@ export const LOCAL_COMMANDS: CommandDef[] = [
       {
         name: 'freq',
         type: 'number',
-        description: 'Frequency in MHz',
+        description: 'Frequency in MHz (v1.15.0+ allows down to 150)',
         required: true,
-        min: 400,
+        min: 150,
         max: 1000,
       },
       {
@@ -149,7 +149,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
   // ========================
   {
     name: 'set_radio.rxgain',
-    description: 'Set RX boosted gain mode (SX1262/SX1268 only, v1.14.1+)',
+    description: 'Set RX boosted gain mode (SX1262/SX1268; also LR1110 v1.16.0+)',
     category: 'Radio Settings',
     params: [
       {
@@ -1027,6 +1027,26 @@ export const LOCAL_COMMANDS: CommandDef[] = [
         required: true,
       },
     ],
+  },
+  {
+    name: 'set_default_flood_scope',
+    description: 'Set the persistent default flood scope used when no per-message scope is set (v1.15.0+)',
+    category: 'Network',
+    params: [
+      {
+        name: 'scope',
+        type: 'string',
+        description: 'Channel/region name (e.g. "public"), or empty / "*" / "0" / "None" to clear',
+        required: true,
+      },
+    ],
+    responseFormat: 'OK',
+  },
+  {
+    name: 'get_default_flood_scope',
+    description: 'Get the persistent default flood scope (v1.15.0+)',
+    category: 'Network',
+    responseFormat: 'Scope name + 16-byte key, or null if unset',
   },
   {
     name: 'send_control_data',

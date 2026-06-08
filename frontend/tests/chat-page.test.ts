@@ -22,6 +22,16 @@ vi.mock('../src/api', () => ({
     has_more_after: false,
     anchor_found: false,
   })),
+  // Consumed by manage-dialog (and channel-dialog beneath it), which
+  // the region-scope chip test mounts via its click handler.
+  getContacts: vi.fn(async () => []),
+  getChannels: vi.fn(async () => []),
+  getDeviceConfig: vi.fn(async () => null),
+  getFloodScopes: vi.fn(async () => []),
+  addContact: vi.fn(async () => ({ success: true })),
+  removeContact: vi.fn(async () => ({ success: true })),
+  removeChannel: vi.fn(async () => ({ success: true })),
+  setChannel: vi.fn(async () => ({ success: true })),
 }));
 
 // Mock entity-resolver — chat-page calls discoverChannelEntity /
@@ -46,6 +56,8 @@ vi.mock('../src/chat/entity-resolver', () => ({
 // versions.
 import '../src/pages/chat-page';
 import type { ChatPage } from '../src/pages/chat-page';
+// Resolves to the vi.mock factory above — used to assert on send calls.
+import * as api from '../src/api';
 import { UnreadController } from '../src/chat/unread-controller';
 import type {
   Channel,
@@ -850,3 +862,81 @@ describe('Phase 4 — indicator visibility', () => {
 // `_unreadCountAtSelection` privates, and the divider logic is now a
 // pure projection on the controller. The Phase 3 send-then-switch
 // fix is covered there too (the leading-outgoing-skip case).
+
+// ─── Region scope — send threading + header chip ─────────────────────────
+//
+// A channel's persisted region scope (Channel.scope, served by
+// ws_get_channels) must ride along on every send as
+// `meshcore.send_channel_message`'s `scope` argument, and surface in
+// the thread header as an always-visible chip while the scoped
+// channel is active.
+describe('region scope', () => {
+  function scopedChannel(idx: number, scope?: string): Channel {
+    return {
+      channel_idx: idx,
+      name: `Ch${idx}`,
+      settings: {},
+      ...(scope ? { scope } : {}),
+    } as unknown as Channel;
+  }
+
+  async function sendFrom(page: ChatPage): Promise<void> {
+    const p = page as unknown as {
+      _conversationResolved: boolean;
+      _inputText: string;
+      _sendMessage(): Promise<void>;
+    };
+    p._conversationResolved = true;
+    p._inputText = 'hello mesh';
+    await p._sendMessage();
+  }
+
+  it('threads the active channel persisted scope into sendChannelMessage', async () => {
+    const page = await mountChatPage({
+      selectedId: '0',
+      conversations: [scopedChannel(0, 'waw')],
+    });
+    await sendFrom(page);
+    expect(vi.mocked(api.sendChannelMessage)).toHaveBeenCalledWith(
+      expect.anything(), 0, 'hello mesh', 'test-entry', 'waw',
+    );
+  });
+
+  it('sends without a scope when the channel has none', async () => {
+    const page = await mountChatPage({
+      selectedId: '0',
+      conversations: [scopedChannel(0)],
+    });
+    await sendFrom(page);
+    expect(vi.mocked(api.sendChannelMessage)).toHaveBeenCalledWith(
+      expect.anything(), 0, 'hello mesh', 'test-entry', undefined,
+    );
+  });
+
+  it('renders the header scope chip and opens Manage → Channels on click', async () => {
+    const page = await mountChatPage({
+      selectedId: '0',
+      conversations: [scopedChannel(0, 'pl-mz')],
+    });
+    const chip = page.shadowRoot!.querySelector('.scope-chip') as HTMLButtonElement;
+    expect(chip).not.toBeNull();
+    expect(chip.textContent).toContain('pl-mz');
+
+    chip.click();
+    await page.updateComplete;
+    const p = page as unknown as {
+      _manageOpen: boolean;
+      _manageInitialTab: string;
+    };
+    expect(p._manageOpen).toBe(true);
+    expect(p._manageInitialTab).toBe('channels');
+  });
+
+  it('omits the chip when the active channel has no scope', async () => {
+    const page = await mountChatPage({
+      selectedId: '0',
+      conversations: [scopedChannel(0)],
+    });
+    expect(page.shadowRoot!.querySelector('.scope-chip')).toBeNull();
+  });
+});

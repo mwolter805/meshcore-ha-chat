@@ -37,6 +37,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.meshcore_chat import (
     MeshCoreChatRuntimeData,
 )
+from custom_components.meshcore_chat.channel_scopes import ChannelScopeStore
 from custom_components.meshcore_chat.const import DOMAIN, MESHCORE_DOMAIN
 from custom_components.meshcore_chat import ws_api
 from pytest_homeassistant_custom_component.common import async_mock_service
@@ -144,6 +145,18 @@ def coordinator(hass: HomeAssistant) -> MagicMock:
     coord = _make_coordinator()
     hass.data[MESHCORE_DOMAIN] = {"meshcore_entry": coord}
     return coord
+
+
+@pytest.fixture
+def scope_store(hass: HomeAssistant) -> ChannelScopeStore:
+    """A real ChannelScopeStore registered where the WS handlers look.
+
+    Uses the real Store helper (PHACC's hass writes to a temp dir), so
+    the persistence path is exercised rather than mocked.
+    """
+    store = ChannelScopeStore(hass)
+    hass.data.setdefault(DOMAIN, {})["channel_scopes"] = store
+    return store
 
 
 @pytest.fixture
@@ -544,6 +557,53 @@ async def test_ws_get_channels_error_no_coordinator(
 ) -> None:
     conn = _Connection()
     await _call_ws(ws_api.ws_get_channels, hass, conn, {"id": 1})
+    assert conn.errors[0][1] == "not_found"
+
+
+async def test_ws_get_channels_merges_persisted_scope(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """Channels carry their persisted region scope; unscoped ones omit the key."""
+    coordinator._channel_info = {
+        0: {"channel_name": "Public"},
+        2: {"channel_name": "Regional"},
+    }
+    await scope_store.async_set("meshcore_entry", 2, "pl-mz")
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_channels, hass, conn, {"id": 1})
+    channels = {c["channel_idx"]: c for c in conn.results[0][1]["channels"]}
+    assert channels[2]["scope"] == "pl-mz"
+    assert "scope" not in channels[0]
+
+
+# ─── ws_get_flood_scopes ────────────────────────────────────────────────
+
+
+async def test_ws_get_flood_scopes_parses_allowlist(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Comma-separated allowlist → trimmed names; sentinels and blanks dropped."""
+    coordinator.config_entry.data = {"flood_scopes": " waw, pl-mz ,, * , # "}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
+    assert conn.results[0][1] == {"scopes": ["waw", "pl-mz"]}
+
+
+async def test_ws_get_flood_scopes_absent_key_returns_empty(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """Older meshcore without the allowlist key → empty list, no error."""
+    coordinator.config_entry.data = {}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
+    assert conn.results[0][1] == {"scopes": []}
+
+
+async def test_ws_get_flood_scopes_error_no_coordinator(
+    hass: HomeAssistant,
+) -> None:
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
     assert conn.errors[0][1] == "not_found"
 
 
@@ -1415,6 +1475,103 @@ async def test_ws_remove_channel_error_no_coordinator(
         {"id": 1, "channel_idx": 0},
     )
     assert conn.errors[0][1] == "not_found"
+
+
+async def test_ws_set_channel_persists_scope(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """A scope supplied with the channel save lands in the scope store."""
+    coordinator.api.mesh_core.commands.set_channel = AsyncMock(
+        return_value=MagicMock()
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_channel,
+        hass,
+        conn,
+        {"id": 1, "channel_idx": 0, "name": "myChan", "scope": "waw"},
+    )
+    assert conn.results[0][1] == {"success": True}
+    assert scope_store.get("meshcore_entry", 0) == "waw"
+    # Device-side save is unchanged by the scope (scope never reaches the radio's slot)
+    coordinator.api.mesh_core.commands.set_channel.assert_awaited_once_with(
+        0, "myChan", None
+    )
+
+
+async def test_ws_set_channel_empty_scope_clears(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """Present-but-empty scope clears a previously persisted record."""
+    await scope_store.async_set("meshcore_entry", 0, "waw")
+    coordinator.api.mesh_core.commands.set_channel = AsyncMock(
+        return_value=MagicMock()
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_channel,
+        hass,
+        conn,
+        {"id": 1, "channel_idx": 0, "name": "myChan", "scope": ""},
+    )
+    assert conn.results[0][1] == {"success": True}
+    assert scope_store.get("meshcore_entry", 0) is None
+
+
+async def test_ws_set_channel_absent_scope_leaves_existing(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """No scope key in the message → existing record untouched."""
+    await scope_store.async_set("meshcore_entry", 0, "waw")
+    coordinator.api.mesh_core.commands.set_channel = AsyncMock(
+        return_value=MagicMock()
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_channel,
+        hass,
+        conn,
+        {"id": 1, "channel_idx": 0, "name": "renamed"},
+    )
+    assert conn.results[0][1] == {"success": True}
+    assert scope_store.get("meshcore_entry", 0) == "waw"
+
+
+async def test_ws_set_channel_sdk_error_does_not_persist_scope(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """A failed device-side save must not record the scope."""
+    coordinator.api.mesh_core.commands.set_channel = AsyncMock(
+        side_effect=asyncio.TimeoutError()
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_channel,
+        hass,
+        conn,
+        {"id": 1, "channel_idx": 0, "name": "x", "scope": "waw"},
+    )
+    assert conn.errors[0][1] == "timeout"
+    assert scope_store.get("meshcore_entry", 0) is None
+
+
+async def test_ws_remove_channel_clears_scope(
+    hass: HomeAssistant, coordinator: MagicMock, scope_store: ChannelScopeStore
+) -> None:
+    """Removing a channel drops its persisted scope with it."""
+    await scope_store.async_set("meshcore_entry", 3, "den")
+    coordinator.api.mesh_core.commands.set_channel = AsyncMock(
+        return_value=MagicMock()
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_remove_channel,
+        hass,
+        conn,
+        {"id": 1, "channel_idx": 3},
+    )
+    assert conn.results[0][1] == {"success": True}
+    assert scope_store.get("meshcore_entry", 3) is None
 
 
 # ─── ws_get_neighbors / ws_remove_neighbor / ws_cleanup_stale_neighbors ─

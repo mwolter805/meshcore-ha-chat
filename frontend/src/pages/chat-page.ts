@@ -57,6 +57,9 @@ export class ChatPage extends LitElement {
   private _mediaHandler: ((e: MediaQueryListEvent) => void) | null = null;
   @state() private _narrowShowMessages = false;
   @state() private _manageOpen = false;
+  // Tab the manage dialog opens on: 'contacts' from the list's Manage
+  // button, 'channels' from the header scope chip.
+  @state() private _manageInitialTab: 'contacts' | 'channels' = 'contacts';
   @state() private _searchOpen = false;
   @state() private _currentEntityId: string | null = null;
   @state() private _conversationResolved = false;
@@ -203,6 +206,10 @@ export class ChatPage extends LitElement {
     .send-button svg {
       width: 20px;
       height: 20px;
+      /* Optical centering: the right-pointing icon's visual mass sits
+         ~2px left of its bounding-box center at this size, so a
+         geometrically centered glyph reads as shifted left. */
+      transform: translateX(2px);
     }
 
     .empty-state {
@@ -346,6 +353,31 @@ export class ChatPage extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    /* Region-scope indicator next to the channel name in the thread
+       header. Always visible while a scoped channel is active so the
+       user knows what scope they're sending under without opening the
+       channel-edit dialog. */
+    .scope-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 8px;
+      padding: 1px 8px;
+      border: none;
+      border-radius: 10px;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.15));
+      color: var(--secondary-text-color);
+      font-size: 12px;
+      line-height: 18px;
+      vertical-align: middle;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .scope-chip:hover {
+      color: var(--primary-text-color);
     }
 
     .narrow-full {
@@ -641,7 +673,7 @@ export class ChatPage extends LitElement {
             <div class="chat-main narrow-full">
               <div class="narrow-header">
                 <button class="back-button" @click=${() => (this._narrowShowMessages = false)}>← Back</button>
-                <span class="narrow-conv-name">${this._getConversationName()}</span>
+                <span class="narrow-conv-name">${this._getConversationName()}${this._renderScopeChip()}</span>
                 <div class="chat-header-actions">
                   <button class="header-action-btn" title="Search messages" aria-label="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
                 </div>
@@ -675,6 +707,7 @@ export class ChatPage extends LitElement {
                 .hass=${this.hass}
                 .entryId=${this.config?.entry_id}
                 .narrow=${this.narrow}
+                .initialTab=${this._manageInitialTab}
                 @manage-closed=${() => this._manageOpen = false}
                 @contacts-changed=${this._onContactsChanged}
                 @channels-changed=${this._onChannelsChanged}
@@ -708,7 +741,7 @@ export class ChatPage extends LitElement {
           ${this.selectedId ? html`
             <div class="narrow-header" style="display: flex; align-items: center; padding: 8px 16px;">
               <div style="flex: 1; font-size: 14px; font-weight: 500; color: var(--primary-text-color);">
-                ${this._getConversationName()}
+                ${this._getConversationName()}${this._renderScopeChip()}
               </div>
               <div class="chat-header-actions">
                 <button class="header-action-btn" title="Search messages" aria-label="Search messages" @click=${() => { this._searchOpen = !this._searchOpen; }}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
@@ -734,6 +767,7 @@ export class ChatPage extends LitElement {
             .hass=${this.hass}
             .entryId=${this.config?.entry_id}
             .narrow=${this.narrow}
+            .initialTab=${this._manageInitialTab}
             @manage-closed=${() => this._manageOpen = false}
             @contacts-changed=${this._onContactsChanged}
             @channels-changed=${this._onChannelsChanged}
@@ -1085,7 +1119,13 @@ export class ChatPage extends LitElement {
           this._inputText = text;
           return;
         }
-        await sendChannelMessage(this.hass, idx, text, entryId);
+        // Thread the channel's persisted region scope into the send so
+        // the upstream service applies (and then resets) the flood
+        // scope around this message.
+        await sendChannelMessage(
+          this.hass, idx, text, entryId,
+          this._getActiveChannelScope() ?? undefined,
+        );
       }
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -1130,6 +1170,7 @@ export class ChatPage extends LitElement {
   }
 
   private _onManageRequested() {
+    this._manageInitialTab = 'contacts';
     this._manageOpen = true;
   }
 
@@ -1159,6 +1200,41 @@ export class ChatPage extends LitElement {
     });
     if (!conv) return this.selectedId;
     return 'pubkey_prefix' in conv ? (conv as Contact).adv_name : (conv as Channel).name;
+  }
+
+  /**
+   * Persisted region scope of the active conversation, when it is a
+   * channel with a scope configured. Threaded into
+   * `meshcore.send_channel_message`'s `scope` argument on each send
+   * and rendered as the header chip. Null for DMs and unscoped
+   * channels.
+   */
+  private _getActiveChannelScope(): string | null {
+    if (!this.selectedId || this._isContact()) return null;
+    const conv = this.conversations.find(
+      (c) => !('pubkey_prefix' in c)
+        && String((c as Channel).channel_idx) === this.selectedId,
+    );
+    return (conv && (conv as Channel).scope) || null;
+  }
+
+  /**
+   * Region-scope chip for the thread header. Absent when the active
+   * conversation has no scope — the common case stays uncluttered.
+   * Clicking opens Manage → Channels, where Edit reaches the scope
+   * field.
+   */
+  private _renderScopeChip() {
+    const scope = this._getActiveChannelScope();
+    if (!scope) return '';
+    return html`<button
+      class="scope-chip"
+      title="Region scope: messages on this channel flood only through '${scope}' repeaters. Click to manage."
+      aria-label="Region scope ${scope} — manage channels"
+      @click=${() => {
+        this._manageInitialTab = 'channels';
+        this._manageOpen = true;
+      }}>🌐 ${scope}</button>`;
   }
 
 

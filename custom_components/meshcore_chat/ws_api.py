@@ -27,6 +27,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from . import MeshCoreChatRuntimeData, _sync_upstream_repair_issue
 from .const import (
+    CONF_FLOOD_SCOPES_UPSTREAM,
     CONF_NAME_UPSTREAM,
     DOMAIN,
     ENTITY_DOMAIN_BINARY_SENSOR,
@@ -393,12 +394,23 @@ def _get_store(
     return None
 
 
+def _get_channel_scopes(hass: HomeAssistant):
+    """Return the process-wide ChannelScopeStore (None before setup).
+
+    The store is created and hydrated by ``async_setup_entry``; handlers
+    tolerate ``None`` so a WS call racing entry setup degrades to
+    "no scopes" instead of raising.
+    """
+    return hass.data.get(DOMAIN, {}).get("channel_scopes")
+
+
 def async_register_ws_commands(hass: HomeAssistant) -> None:
     """Register all MeshCore Chat WebSocket commands."""
     # Device / contact / channel read commands
     websocket_api.async_register_command(hass, ws_get_devices)
     websocket_api.async_register_command(hass, ws_get_contacts)
     websocket_api.async_register_command(hass, ws_get_channels)
+    websocket_api.async_register_command(hass, ws_get_flood_scopes)
 
     # Device config and command-execution commands
     websocket_api.async_register_command(hass, ws_get_managed_devices)
@@ -726,6 +738,9 @@ def ws_get_channels(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
         return
 
+    scope_store = _get_channel_scopes(hass)
+    upstream_entry_id = coordinator.config_entry.entry_id
+
     channels = []
     for idx in range(coordinator.max_channels):
         info = coordinator._channel_info.get(idx, {})
@@ -745,14 +760,59 @@ def ws_get_channels(hass, connection, msg):
                 }
             else:
                 sanitized[k] = v
-        channels.append(
-            {
-                "channel_idx": idx,
-                "name": channel_name,
-                "settings": sanitized,
-            }
-        )
+        channel_entry = {
+            "channel_idx": idx,
+            "name": channel_name,
+            "settings": sanitized,
+        }
+        # Merge the persisted per-channel region scope. The device-side
+        # channel slot carries no scope field — the chat owns this record
+        # (see channel_scopes.py) and the frontend threads it into
+        # meshcore.send_channel_message's scope argument on each send.
+        scope = scope_store.get(upstream_entry_id, idx) if scope_store else None
+        if scope:
+            channel_entry["scope"] = scope
+        channels.append(channel_entry)
     connection.send_result(msg["id"], {"channels": channels})
+
+
+# ─── meshcore/get_flood_scopes ──────────────────────────────────────────
+# Region-scope allowlist from the upstream integration's Global Settings
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "meshcore_chat/get_flood_scopes",
+        vol.Optional("entry_id"): str,
+    }
+)
+@callback
+def ws_get_flood_scopes(hass, connection, msg):
+    """Return the upstream integration's configured region-scope names.
+
+    Reads the comma-separated allowlist the user maintains in the
+    meshcore integration's Global Settings (config-entry data key
+    ``flood_scopes``, added by meshcore-dev/meshcore-ha#250). Returns an
+    empty list when the allowlist is unconfigured or when the installed
+    meshcore predates the feature — the channel dialog renders its setup
+    guidance in that case, which also prevents configuring scoped sends
+    against an integration whose send_channel_message would reject the
+    scope argument.
+    """
+    coordinator = _get_coordinator(hass, msg.get("entry_id"))
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
+        return
+
+    raw = coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+    scopes: list[str] = []
+    if isinstance(raw, str):
+        for part in raw.split(","):
+            name = part.strip()
+            # "*" / "#" are reset/wildcard sentinels, not selectable regions.
+            if name and name not in ("*", "#"):
+                scopes.append(name)
+    connection.send_result(msg["id"], {"scopes": scopes})
 
 
 # ─── meshcore/get_managed_devices ───────────────────────────────────────
@@ -1430,6 +1490,7 @@ async def ws_execute_remote(hass, connection, msg):
         vol.Required("channel_idx"): int,
         vol.Required("name"): str,
         vol.Optional("key"): str,
+        vol.Optional("scope"): str,
     }
 )
 @websocket_api.require_admin
@@ -1462,6 +1523,20 @@ async def ws_set_channel(hass, connection, msg):
         result = await coordinator.api.mesh_core.commands.set_channel(
             channel_idx, name, channel_secret
         )
+
+        # Persist the per-channel region scope alongside the device-side
+        # save. The radio's channel slot has no scope field — scope is a
+        # per-send argument on meshcore.send_channel_message (upstream
+        # meshcore-ha#250) — so the chat keeps the user's choice in its
+        # own store (channel_scopes.py) and threads it into each send.
+        # Present-but-empty clears the record; an absent key leaves any
+        # existing scope untouched (callers that predate the field).
+        if "scope" in msg:
+            scope_store = _get_channel_scopes(hass)
+            if scope_store:
+                await scope_store.async_set(
+                    coordinator.config_entry.entry_id, channel_idx, msg["scope"]
+                )
 
         # Re-fetch channel info so coordinator state matches the device
         await coordinator._fetch_all_channel_info()
@@ -1514,6 +1589,14 @@ async def ws_remove_channel(hass, connection, msg):
         result = await coordinator.api.mesh_core.commands.set_channel(
             channel_idx, "", None
         )
+
+        # Drop the persisted region scope with the channel — a future
+        # channel created in this slot starts unscoped.
+        scope_store = _get_channel_scopes(hass)
+        if scope_store:
+            await scope_store.async_set(
+                coordinator.config_entry.entry_id, channel_idx, None
+            )
 
         # Re-fetch channel info so coordinator state matches the device
         await coordinator._fetch_all_channel_info()
