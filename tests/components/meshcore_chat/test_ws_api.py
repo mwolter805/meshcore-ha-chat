@@ -3657,3 +3657,204 @@ async def test_ws_clear_discovered_contacts_clear_all_uses_correct_identifiers(
         "binary_sensor", MESHCORE_DOMAIN, f"meshcore_entry_contact_{_RC_PREFIX}"
     )
     reg.async_remove.assert_called_once_with("binary_sensor.meshcore_contact")
+
+
+# ─── ws_set_device_config: device-config commands report real outcomes ──
+#
+# The four device-config setters (set_tx_power / set_coords / set_radio /
+# set_path_hash_mode) previously appended to ``changed`` without
+# inspecting the result. The SDK's ``send()`` never raises on a failed
+# command — it returns ``None`` or an ``Event(EventType.ERROR, …)`` — so a
+# firmware rejection or offline radio was reported as success (issue #7).
+# These tests pin the corrected behaviour: a non-OK result surfaces a
+# ``command_failed`` error naming the setting (plus the already-applied
+# ones) and is NOT counted; an OK result still counts as success.
+
+
+async def test_ws_set_device_config_tx_power_error_surfaces_failure(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+    patched_event_type,
+) -> None:
+    """A tx_power ERROR Event sends ``command_failed`` and is not counted."""
+    coordinator.api.mesh_core.commands.set_tx_power = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.ERROR, {"reason": "timeout"})
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {"id": 1, "settings": {"tx_power": 20}},
+    )
+
+    # No success result; one command_failed error naming the field + reason.
+    assert conn.results == []
+    assert len(conn.errors) == 1
+    _, code, message = conn.errors[0]
+    assert code == "command_failed"
+    assert "tx_power" in message
+    # The send()-level reason is surfaced (not "unknown").
+    assert "timeout" in message
+
+
+async def test_ws_set_device_config_tx_power_none_surfaces_failure(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+) -> None:
+    """A None result (nothing responded) is treated as failure.
+
+    No ``patched_event_type`` needed — the None short-circuit returns
+    before the lazy ``EventType`` import.
+    """
+    coordinator.api.mesh_core.commands.set_tx_power = AsyncMock(
+        return_value=None
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {"id": 1, "settings": {"tx_power": 20}},
+    )
+
+    assert conn.results == []
+    assert len(conn.errors) == 1
+    _, code, message = conn.errors[0]
+    assert code == "command_failed"
+    assert "tx_power" in message
+
+
+async def test_ws_set_device_config_tx_power_ok_counts_success(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+    patched_event_type,
+) -> None:
+    """An OK Event (including empty payload) still counts as success."""
+    coordinator.api.mesh_core.commands.set_tx_power = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    # changed is non-empty → the post-loop self_info refresh runs.
+    coordinator.api.mesh_core.commands.send_appstart = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    coordinator.api._cache_self_info_event = MagicMock()
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {"id": 1, "settings": {"tx_power": 20}},
+    )
+
+    assert conn.errors == []
+    assert len(conn.results) == 1
+    _, result = conn.results[0]
+    assert result["success"] is True
+    assert "tx_power" in result["changed"]
+
+
+async def test_ws_set_device_config_aborts_and_reports_already_applied(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+    patched_event_type,
+) -> None:
+    """Abort-on-first-failure names the failed setting and lists the
+    settings already applied this call, so a partial application is
+    visible to the user, and no later setting is attempted.
+    """
+    coordinator.api.mesh_core.commands.set_tx_power = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    coordinator.api.mesh_core.commands.set_coords = AsyncMock(
+        return_value=_FakeEvent(
+            _FakeEventType.ERROR, {"reason": "no_event_received"}
+        )
+    )
+    coordinator.api.mesh_core.commands.set_path_hash_mode = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {
+            "id": 1,
+            "settings": {
+                "tx_power": 20,
+                "latitude": 1.0,
+                "longitude": 2.0,
+                "path_hash_mode": 1,
+            },
+        },
+    )
+
+    assert conn.results == []
+    assert len(conn.errors) == 1
+    _, code, message = conn.errors[0]
+    assert code == "command_failed"
+    assert "coords" in message  # the setting that failed
+    assert "tx_power" in message  # already applied this call
+    assert "no_event_received" in message  # the surfaced reason
+    coordinator.api.mesh_core.commands.set_coords.assert_awaited_once()
+    # Abort before the later setting — it must never be attempted.
+    coordinator.api.mesh_core.commands.set_path_hash_mode.assert_not_awaited()
+
+
+async def test_ws_set_device_config_radio_error_surfaces_failure(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+    patched_event_type,
+) -> None:
+    """A radio ERROR (the four-field group) reports field ``radio``."""
+    coordinator.api.self_info = {
+        "radio_freq": 915.0,
+        "radio_bw": 250.0,
+        "radio_sf": 11,
+        "radio_cr": 5,
+    }
+    coordinator.api.mesh_core.commands.set_radio = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.ERROR, {"error": "busy"})
+    )
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {"id": 1, "settings": {"frequency": 868.0}},
+    )
+
+    assert conn.results == []
+    assert len(conn.errors) == 1
+    _, code, message = conn.errors[0]
+    assert code == "command_failed"
+    assert "radio" in message
+    assert "busy" in message
+
+
+async def test_ws_set_device_config_path_hash_mode_ok_counts_success(
+    hass: HomeAssistant,
+    coordinator: MagicMock,
+    patched_event_type,
+) -> None:
+    """The fourth setter (set_path_hash_mode) also counts an OK as success."""
+    coordinator.api.mesh_core.commands.set_path_hash_mode = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    coordinator.api.mesh_core.commands.send_appstart = AsyncMock(
+        return_value=_FakeEvent(_FakeEventType.OK, {})
+    )
+    coordinator.api._cache_self_info_event = MagicMock()
+    conn = _Connection()
+    await _call_ws(
+        ws_api.ws_set_device_config,
+        hass,
+        conn,
+        {"id": 1, "settings": {"path_hash_mode": 1}},
+    )
+
+    assert conn.errors == []
+    assert len(conn.results) == 1
+    _, result = conn.results[0]
+    assert "path_hash_mode" in result["changed"]

@@ -1070,6 +1070,53 @@ def _migrate_entity_ids_name_suffix(
     return migrated
 
 
+def _device_config_failure_reason(result):
+    """Return a failure reason for a device-config command, or None if OK.
+
+    The meshcore SDK's ``send()`` never raises on a failed command — it
+    returns ``None`` when nothing responded and ``Event(EventType.ERROR,
+    …)`` on a timeout or NACK — so a setter that "succeeds" at the await
+    must still have its result inspected. ``EventType`` is imported lazily
+    so a test env without the SDK doesn't trip on import when the result
+    is ``None``.
+
+    The reason is read from the SDK-level ERROR payload keys
+    (``reason``/``error``) first — the dominant device-config failure mode
+    is an offline radio, which surfaces as ``{"reason": "timeout"}`` at the
+    ``send()`` level — then the firmware-NACK keys
+    (``code_string``/``error_code``) the rename path uses.
+    """
+    if result is None:
+        return "no response"
+    from meshcore.events import EventType
+    if getattr(result, "type", None) == EventType.ERROR:
+        payload = getattr(result, "payload", None) or {}
+        return (
+            payload.get("reason")
+            or payload.get("error")
+            or payload.get("code_string")
+            or payload.get("error_code")
+            or "unknown"
+        )
+    return None
+
+
+def _send_device_config_failure(connection, msg_id, field, reason, changed):
+    """Report a rejected device-config setting (abort-on-first-failure).
+
+    Names the setting that failed and the firmware/SDK reason, and lists
+    the settings already applied this call so the user knows what stuck.
+    Keeps the existing single-error WS contract — the panel's existing
+    error toast renders the message.
+    """
+    applied = ", ".join(changed) if changed else "none"
+    connection.send_error(
+        msg_id,
+        "command_failed",
+        f"Failed to set {field}: {reason} (already applied: {applied})",
+    )
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "meshcore_chat/set_device_config",
@@ -1239,14 +1286,28 @@ async def ws_set_device_config(hass, connection, msg):
 
         # Handle tx_power setting
         if "tx_power" in settings:
-            await coordinator.api.mesh_core.commands.set_tx_power(settings["tx_power"])
+            result = await coordinator.api.mesh_core.commands.set_tx_power(
+                settings["tx_power"]
+            )
+            reason = _device_config_failure_reason(result)
+            if reason is not None:
+                _send_device_config_failure(
+                    connection, msg["id"], "tx_power", reason, changed
+                )
+                return
             changed.append("tx_power")
 
         # Handle coordinates setting
         if "latitude" in settings and "longitude" in settings:
-            await coordinator.api.mesh_core.commands.set_coords(
+            result = await coordinator.api.mesh_core.commands.set_coords(
                 settings["latitude"], settings["longitude"]
             )
+            reason = _device_config_failure_reason(result)
+            if reason is not None:
+                _send_device_config_failure(
+                    connection, msg["id"], "coords", reason, changed
+                )
+                return
             changed.append("coords")
 
         # Handle radio settings - all four must be provided together
@@ -1260,14 +1321,30 @@ async def ws_set_device_config(hass, connection, msg):
             cr = settings.get("coding_rate", self_info.get("radio_cr"))
 
             if all(v is not None for v in [freq, bw, sf, cr]):
-                await coordinator.api.mesh_core.commands.set_radio(freq, bw, sf, cr)
+                result = await coordinator.api.mesh_core.commands.set_radio(
+                    freq, bw, sf, cr
+                )
+                reason = _device_config_failure_reason(result)
+                if reason is not None:
+                    _send_device_config_failure(
+                        connection, msg["id"], "radio", reason, changed
+                    )
+                    return
                 changed.extend([k for k in radio_keys if k in settings])
             else:
                 _LOGGER.warning("Cannot set radio: missing current values for unset params")
 
         # Handle path_hash_mode
         if "path_hash_mode" in settings:
-            await coordinator.api.mesh_core.commands.set_path_hash_mode(settings["path_hash_mode"])
+            result = await coordinator.api.mesh_core.commands.set_path_hash_mode(
+                settings["path_hash_mode"]
+            )
+            reason = _device_config_failure_reason(result)
+            if reason is not None:
+                _send_device_config_failure(
+                    connection, msg["id"], "path_hash_mode", reason, changed
+                )
+                return
             changed.append("path_hash_mode")
 
         # Refresh self_info cache so subsequent reads return updated values
