@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.core import HomeAssistant
 from homeassistant.util import slugify
 
-from .const import MESHCORE_DOMAIN
+from .const import CONF_FLOOD_SCOPES_UPSTREAM, MESHCORE_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -121,19 +122,84 @@ def enrich_rx_log_entries(rx_log_data):
     return changed
 
 
-def derive_flood_scope(rx_log_data) -> tuple[str | None, bool | None]:
+def parse_flood_scope_allowlist(raw: object) -> tuple[list[str], bool]:
+    """Parse the upstream integration's comma-separated flood-scope
+    allowlist into ``(named_region_scopes, wildcard_present)``.
+
+    ``'#'`` and blank entries are sentinels/noise (skipped); ``'*'`` is the
+    global wildcard — returned as the boolean, never in the named list.
+    Shared by ``ws_get_flood_scopes`` (the dialog's scope picker) and the
+    inbound-label self-derive so the two cannot drift.
+    """
+    scopes: list[str] = []
+    has_global = False
+    if isinstance(raw, str):
+        for part in raw.split(","):
+            name = part.strip()
+            if not name or name == "#":
+                continue
+            if name == "*":
+                has_global = True
+                continue
+            scopes.append(name)
+    return scopes, has_global
+
+
+def wildcard_global_allowlisted(hass: HomeAssistant) -> bool:
+    """True when the upstream meshcore flood-scope allowlist contains ``'*'``.
+
+    The allowlist (``CONF_FLOOD_SCOPES_UPSTREAM``) lives on the *upstream*
+    meshcore config entry, which the companion consumes via
+    ``hass.data[MESHCORE_DOMAIN]`` — not on the chat's own entry. Reads the
+    first registered upstream coordinator; the allowlist is effectively
+    singleton config, and the inbound-ingest path carries no per-entry
+    context to scope it further. Returns False when no upstream coordinator
+    (or its config entry) is present.
+
+    Gates synthesizing the ``'*'`` "all regions" label at the inbound
+    self-derive call sites (live ingest in ``__init__`` and the
+    message-store migration / late-correlation paths), matching the opt-in
+    behavior of the dialog's scope picker.
+    """
+    for coord in (hass.data.get(MESHCORE_DOMAIN) or {}).values():
+        config_entry = getattr(coord, "config_entry", None)
+        if config_entry is None:
+            continue
+        _, has_global = parse_flood_scope_allowlist(
+            config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+        )
+        return has_global
+    return False
+
+
+def derive_flood_scope(
+    rx_log_data, wildcard_global: bool = False
+) -> tuple[str | None, bool | None]:
     """Derive one ``(flood_scope, region_scope)`` for a message from its
     per-repeater rx_log entries.
 
-    The upstream meshcore integration stamps each rx_log entry of a
-    received channel message with ``flood_scope`` ("*" for a global flood
-    when the user allowlisted "*", a region name for a transport-scoped
-    flood, else None) and ``region_scope`` (True when the flood carried a
-    transport region code). All per-repeater entries of one received
-    message describe the same packet, so they share one scope — this
-    returns the first entry's values. Returns ``(None, None)`` when no
-    entry carries the fields: DMs, synthesized route entries, or messages
-    received before the integration stamped scope.
+    Stock upstream meshcore-ha stamps each rx_log entry of a received
+    channel message with ``region_scope`` (``route_type == 0`` — True when
+    the flood carried a transport region code) and, for a transport-scoped
+    flood, a ``flood_scope`` region name (via ``match_flood_scope``). It
+    does *not* supply a label for an unscoped/global flood. All
+    per-repeater entries of one received message describe the same packet,
+    so they share one scope — this returns the first entry's values.
+
+    When the entries describe an explicit global flood (``region_scope`` is
+    ``False``) with no upstream-supplied ``flood_scope`` and the caller
+    passes ``wildcard_global=True`` (the user allowlisted ``'*'``), the
+    "all regions" label ``'*'`` is synthesized here. ``'*'`` is a
+    presentation label local to this panel, not a wire/protocol value
+    (the firmware transmits a global flood as a plain ``FLOOD``); deriving
+    it from the protocol fact (``region_scope``) is why this consumer owns
+    the label rather than the integration. The gate is ``region_scope is
+    False`` (explicit global), never ``None`` (DM / no rx scope), so DMs
+    and unscoped-info messages stay unlabelled.
+
+    Returns ``(None, None)`` when no entry carries the fields: DMs,
+    synthesized route entries, or messages received before the integration
+    stamped scope.
     """
     if not rx_log_data:
         return None, None
@@ -146,10 +212,17 @@ def derive_flood_scope(rx_log_data) -> tuple[str | None, bool | None]:
             flood_scope = entry["flood_scope"]
         if region_scope is None and entry.get("region_scope") is not None:
             region_scope = entry["region_scope"]
+    if flood_scope is None and region_scope is False and wildcard_global:
+        # Global/unscoped flood (a plain FLOOD, route_type 1 -> region_scope
+        # False). Stock upstream meshcore-ha supplies no flood_scope for this
+        # case (only named regions, via match_flood_scope); '*' is this
+        # panel's label for "all regions", applied only when the user
+        # allowlisted '*'.
+        flood_scope = "*"
     return flood_scope, region_scope
 
 
-def hoist_flood_scope(message: dict) -> bool:
+def hoist_flood_scope(message: dict, wildcard_global: bool = False) -> bool:
     """Hoist ``flood_scope``/``region_scope`` from a message's rx_log_data
     to top-level record fields the frontend reads.
 
@@ -157,11 +230,15 @@ def hoist_flood_scope(message: dict) -> bool:
     which is frequently correlated and patched in *after* the bubble first
     renders. Hoisting one value to the top of the record (the same place
     ``repeater_count`` is kept correct) lets the panel show the scope
-    without re-deriving from the per-repeater array. No-op when the message
+    without re-deriving from the per-repeater array. ``wildcard_global`` is
+    forwarded to ``derive_flood_scope`` so an explicit global flood can be
+    labelled ``'*'`` when the user allowlisted it. No-op when the message
     carries no rx_log scope (the fields stay absent). Mutates ``message``
     in place; returns True if anything changed.
     """
-    flood_scope, region_scope = derive_flood_scope(message.get("rx_log_data"))
+    flood_scope, region_scope = derive_flood_scope(
+        message.get("rx_log_data"), wildcard_global
+    )
     changed = False
     if flood_scope is not None and message.get("flood_scope") != flood_scope:
         message["flood_scope"] = flood_scope

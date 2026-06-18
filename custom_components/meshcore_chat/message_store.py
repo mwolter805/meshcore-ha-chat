@@ -44,7 +44,11 @@ from .const import (
     STORAGE_KEY_INDEX,
     STORAGE_VERSION,
 )
-from .utils import enrich_rx_log_entries, hoist_flood_scope
+from .utils import (
+    enrich_rx_log_entries,
+    hoist_flood_scope,
+    wildcard_global_allowlisted,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,7 +58,9 @@ def _safe_id(entity_id: str) -> str:
     return entity_id.replace(".", "_")
 
 
-def _backfill_messages(messages: list[dict]) -> bool:
+def _backfill_messages(
+    messages: list[dict], wildcard_global: bool = False
+) -> bool:
     """One-time, in-place migration of stored records.
 
     Four backfills:
@@ -95,7 +101,7 @@ def _backfill_messages(messages: list[dict]) -> bool:
         # Hoist inbound region scope from the (now enriched) rx_log entries
         # to a top-level field so existing stored channel messages show
         # their scope after this migration runs.
-        if hoist_flood_scope(m):
+        if hoist_flood_scope(m, wildcard_global):
             changed = True
         if (
             m.get("outgoing")
@@ -199,7 +205,9 @@ class MessageStore:
         messages: list[dict] = stored or []
         # One-time backfill on first load — enriches old records that pre-date
         # the rx_log/delivery-status fixes. Persists on next save.
-        if messages and _backfill_messages(messages):
+        if messages and _backfill_messages(
+            messages, wildcard_global_allowlisted(self.hass)
+        ):
             _LOGGER.debug(
                 "Backfilled rx_log/delivery_status on stored records for %s",
                 entity_id,
@@ -297,7 +305,7 @@ class MessageStore:
                 # usually correlated *after* the message first stored, so
                 # re-hoist the top-level field on this late patch — the
                 # same place repeater_count is kept correct.
-                hoist_flood_scope(m)
+                hoist_flood_scope(m, wildcard_global_allowlisted(self.hass))
                 self._conversation_dirty.add(entity_id)
                 self._schedule_conversation_save(entity_id)
                 return

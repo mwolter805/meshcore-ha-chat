@@ -195,13 +195,28 @@ def test_backfill_hoists_region_flood_scope() -> None:
 
 def test_backfill_unscoped_flood_hoists_region_scope_only() -> None:
     """An unscoped flood (flood_scope None, region_scope False) hoists
-    region_scope but leaves flood_scope absent — the bubble shows nothing."""
+    region_scope but leaves flood_scope absent — the bubble shows nothing
+    when '*' is not allowlisted (the default)."""
     msg = {
         "id": "fs3",
         "rx_log_data": [{"flood_scope": None, "region_scope": False}],
     }
     assert _backfill_messages([msg]) is True
     assert "flood_scope" not in msg
+    assert msg["region_scope"] is False
+
+
+def test_backfill_global_flood_self_derives_when_allowlisted() -> None:
+    """A stock-upstream-shaped global flood (region_scope False, no
+    flood_scope) self-derives the '*' label when the caller passes
+    wildcard_global — proving the migration path works on stock upstream
+    without the downstream integration patch."""
+    msg = {
+        "id": "fs3b",
+        "rx_log_data": [{"region_scope": False}, {"region_scope": False}],
+    }
+    assert _backfill_messages([msg], wildcard_global=True) is True
+    assert msg["flood_scope"] == "*"
     assert msg["region_scope"] is False
 
 

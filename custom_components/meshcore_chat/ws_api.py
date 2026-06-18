@@ -34,7 +34,7 @@ from .const import (
     MESHCORE_DOMAIN,
 )
 from .message_store import MessageStore
-from .utils import format_entity_id, sanitize_name
+from .utils import format_entity_id, parse_flood_scope_allowlist, sanitize_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -809,24 +809,14 @@ def ws_get_flood_scopes(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", "No MeshCore coordinator found")
         return
 
-    raw = coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
-    scopes: list[str] = []
-    has_global = False
-    if isinstance(raw, str):
-        for part in raw.split(","):
-            name = part.strip()
-            if not name or name == "#":
-                # "#" is a parser sentinel and blanks are noise — neither
-                # is a selectable region.
-                continue
-            if name == "*":
-                # The wildcard is the explicit "all regions / global flood"
-                # choice. Surface it as a distinct flag rather than a named
-                # region so the dialog can render one canonical global
-                # option and the named-region list stays free of sentinels.
-                has_global = True
-                continue
-            scopes.append(name)
+    # Shared parser (utils.parse_flood_scope_allowlist) so this picker and
+    # the inbound-label self-derive can't drift on '*'/'#' handling: '#'
+    # and blanks are dropped, '*' becomes the distinct "all regions /
+    # global flood" flag (kept out of the named-region list) so the dialog
+    # renders one canonical global option.
+    scopes, has_global = parse_flood_scope_allowlist(
+        coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+    )
     connection.send_result(msg["id"], {"scopes": scopes, "global": has_global})
 
 
