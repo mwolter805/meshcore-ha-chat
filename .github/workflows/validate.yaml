@@ -18,7 +18,7 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Run hassfest
         # Pinned to 2026-04-07 HEAD on home-assistant/actions/master.
@@ -32,7 +32,7 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Run HACS validation
         # Pinned to 2026-01-26 HEAD on hacs/action/main.

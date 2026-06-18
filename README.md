@@ -117,6 +117,13 @@ For a walkthrough of common tasks (adding contacts, managing channels, issuing c
 - Home Assistant 2024.12 or newer
 - The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) **v2.6.0 or newer** installed and configured. The chat companion calls the structured query services (`meshcore.get_contacts`, `meshcore.trace`) introduced in 2.6.0 (released 2026-04-27); on older versions the trace dialog returns a *"service not registered"* error and the contact list falls back to a legacy code path with a one-time warning in the logs.
 
+## Security
+
+Security issues can be reported privately — see [SECURITY.md](SECURITY.md). For how the integration handles untrusted, mesh-sourced data and where its trust boundaries are, see [docs/security-posture.md](docs/security-posture.md).
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mwolter805/meshcore-ha-chat/badge)](https://scorecard.dev/viewer/?uri=github.com/mwolter805/meshcore-ha-chat)
+[![CodeQL](https://github.com/mwolter805/meshcore-ha-chat/actions/workflows/codeql.yml/badge.svg)](https://github.com/mwolter805/meshcore-ha-chat/actions/workflows/codeql.yml)
+
 ## Relationship to other projects
 
 - [meshcore-dev/meshcore-ha](https://github.com/meshcore-dev/meshcore-ha) — the core integration that drives the MeshCore radio. **Required.**  

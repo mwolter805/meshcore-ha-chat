@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # GitHub Actions used by the workflows in .github/workflows/.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Frontend panel dependencies (lit runtime + the rollup/vitest toolchain).
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Python test/tooling dependencies (requirements_test.txt, pyproject.toml).
+  # The integration declares no runtime Python requirements, so this covers
+  # only the test and tooling surface.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      pip-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
