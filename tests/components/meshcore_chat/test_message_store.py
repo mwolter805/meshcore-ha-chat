@@ -31,9 +31,11 @@ warnings.
 """
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -44,6 +46,8 @@ from custom_components.meshcore_chat.const import (
     MESSAGE_STORE_IDLE_EVICTION_SECONDS,
     OPT_MAX_MESSAGES_PER_CONVERSATION,
     OPT_MESSAGE_RETENTION_DAYS,
+    STORAGE_KEY_CONVERSATION,
+    STORAGE_KEY_INDEX,
 )
 from custom_components.meshcore_chat.message_store import (
     MessageStore,
@@ -918,3 +922,229 @@ async def test_search_scoped_vs_cross_conversation(
     assert {h["id"] for h in cross} == {"L", "R"}
     scoped = await store.search("needle", entity_id="binary_sensor.left")
     assert {h["id"] for h in scoped} == {"L"}
+
+
+# ─── storage hardening: corrupt-load validation ────────────────────────
+#
+# HA's Store does no type validation. A corrupt or wrong-shape store file
+# must be logged and discarded in memory (falling back to empty) WITHOUT
+# rewriting the on-disk file, so the data is recoverable and a single bad
+# read does not poison the pipeline or raise.
+
+ENTRY_ID = "01TEST_ENTRY"
+_INDEX_KEY = STORAGE_KEY_INDEX.format(entry_id=ENTRY_ID)
+
+
+def _conv_key(entity_id: str) -> str:
+    return STORAGE_KEY_CONVERSATION.format(
+        entry_id=ENTRY_ID, safe_entity_id=entity_id.replace(".", "_")
+    )
+
+
+def _seed(hass_storage: dict, key: str, data: Any) -> None:
+    """Pre-populate PHACC's storage dict so async_load returns ``data``."""
+    hass_storage[key] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": key,
+        "data": data,
+    }
+
+
+async def test_async_load_index_corrupt_type_falls_back(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    hass_storage: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-dict index payload is logged and discarded; file left intact."""
+    caplog.set_level(logging.ERROR)
+    _seed(hass_storage, _INDEX_KEY, ["not", "a", "dict"])
+
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+
+    assert s.get_message_index() == {}
+    assert "corrupt message index" in caplog.text
+    # On-disk file is NOT rewritten on the bad-load path.
+    assert hass_storage[_INDEX_KEY]["data"] == ["not", "a", "dict"]
+    await s.async_unload()
+
+
+async def test_ensure_loaded_corrupt_type_falls_back(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    hass_storage: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-list conversation payload loads as empty; file left intact."""
+    caplog.set_level(logging.ERROR)
+    eid = "binary_sensor.alice"
+    _seed(hass_storage, _conv_key(eid), {"corrupt": "dict"})
+
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    messages = await s._ensure_loaded(eid)
+
+    assert messages == []
+    assert "corrupt message store" in caplog.text
+    assert eid in caplog.text
+    # The corrupt file is preserved (not overwritten by the load).
+    assert hass_storage[_conv_key(eid)]["data"] == {"corrupt": "dict"}
+    await s.async_unload()
+
+
+async def test_load_for_search_corrupt_type_falls_back(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    hass_storage: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The non-caching search load also validates the stored shape.
+
+    ``_load_for_search`` does its own ``async_load`` and does NOT route
+    through ``_ensure_loaded``, so it needs its own guard — otherwise a
+    corrupt store is unguarded whenever a conversation is searched while
+    it is not open.
+    """
+    caplog.set_level(logging.ERROR)
+    eid = "binary_sensor.bob"
+    _seed(hass_storage, _conv_key(eid), 12345)  # an int — not a list
+
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    result = await s._load_for_search(eid)
+
+    assert result == []
+    assert "corrupt message store" in caplog.text
+    assert hass_storage[_conv_key(eid)]["data"] == 12345
+    await s.async_unload()
+
+
+# ─── storage hardening: flush dirty-retention on save failure ──────────
+
+
+async def test_flush_retains_dirty_and_logs_once_on_save_failure(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed per-conversation save keeps its dirty flag for retry.
+
+    The previous flush cleared ``_conversation_dirty`` unconditionally,
+    so a save that never reached disk silently lost the data. Now a
+    failed save retains the entity_id (passive retry) and emits exactly
+    one aggregated error per flush — no per-message log spam even when the
+    store is permanently broken.
+    """
+    caplog.set_level(logging.ERROR)
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    eid = "binary_sensor.alice"
+    await s.store_message(
+        eid, {"id": "m1", "timestamp": "2026-01-01T00:00:00", "text": "hi"}
+    )
+    assert eid in s._conversation_dirty
+
+    conv_store = s._conversation_stores[eid]
+    with patch.object(
+        conv_store, "async_save", side_effect=OSError("disk full")
+    ):
+        for _ in range(3):
+            caplog.clear()
+            await s.flush()
+            # Dirty flag retained for the next flush (no silent loss).
+            assert eid in s._conversation_dirty
+            # Exactly one aggregated error line per flush.
+            queued = [
+                r for r in caplog.records if "remain queued" in r.getMessage()
+            ]
+            assert len(queued) == 1
+
+    # With saving healthy again, a flush clears the dirty set.
+    await s.flush()
+    assert eid not in s._conversation_dirty
+    await s.async_unload()
+
+
+# ─── storage hardening: retention-cleanup guards ───────────────────────
+
+
+async def test_cleanup_skips_corrupt_noncached_store(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    hass_storage: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A corrupt (non-list) store is logged and skipped; index retained."""
+    caplog.set_level(logging.ERROR)
+    eid = "binary_sensor.alice"
+    _seed(
+        hass_storage,
+        _INDEX_KEY,
+        {
+            eid: {
+                "message_count": 1,
+                "last_message_ts": "old",
+                "last_sender": "x",
+                "last_preview": "p",
+            }
+        },
+    )
+    _seed(hass_storage, _conv_key(eid), {"corrupt": "dict"})
+
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    await s.cleanup_old_messages()  # must not raise
+
+    assert eid in s.get_message_index()  # index untouched
+    assert "corrupt message store" in caplog.text
+    assert hass_storage[_conv_key(eid)]["data"] == {"corrupt": "dict"}
+    await s.async_unload()
+
+
+async def test_cleanup_save_failure_leaves_index_untouched(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    hass_storage: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A save failure during prune is logged and the index entry is kept.
+
+    Leaving the index untouched means the next cleanup run retries the
+    prune rather than recording a trim that never reached disk.
+    """
+    caplog.set_level(logging.ERROR)
+    eid = "binary_sensor.alice"
+    old_ts = (datetime.now() - timedelta(days=200)).isoformat()
+    _seed(
+        hass_storage,
+        _INDEX_KEY,
+        {
+            eid: {
+                "message_count": 1,
+                "last_message_ts": old_ts,
+                "last_sender": "x",
+                "last_preview": "old",
+            }
+        },
+    )
+    _seed(
+        hass_storage,
+        _conv_key(eid),
+        [{"id": "m1", "timestamp": old_ts, "text": "old"}],
+    )
+
+    s = MessageStore(hass, config_entry)
+    await s.async_load_index()
+    # Pre-create the conversation store so cleanup reuses this instance and
+    # the patched save is the one it calls.
+    conv_store = s._store_for(eid)
+    with patch.object(
+        conv_store, "async_save", side_effect=OSError("disk full")
+    ):
+        await s.cleanup_old_messages()  # must not raise
+
+    assert eid in s.get_message_index()  # index NOT mutated → retry next run
+    assert "retention cleanup" in caplog.text
+    await s.async_unload()

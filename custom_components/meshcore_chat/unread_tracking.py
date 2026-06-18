@@ -179,7 +179,13 @@ class UnreadTracker:
         if self._save_timer is not None:
             self._save_timer.cancel()
             self._save_timer = None
-        await self._store.async_save(self._last_read)
+        # A save failure must not propagate (this runs from a debounce-timer
+        # task and from async_unload_entry); log it and keep the in-memory
+        # cursors so the next save attempt can retry.
+        try:
+            await self._store.async_save(self._last_read)
+        except Exception as ex:
+            _LOGGER.error("Failed to persist last-read cursors: %s", ex)
 
     def clear(self) -> None:
         """No-op (kept for callsite compatibility).

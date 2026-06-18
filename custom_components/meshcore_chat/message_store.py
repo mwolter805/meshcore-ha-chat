@@ -124,6 +124,30 @@ def _backfill_messages(
     return changed
 
 
+def _coerce_message_list(stored: Any, entity_id: str) -> list[dict]:
+    """Return a validated conversation message list, or ``[]`` on a bad shape.
+
+    HA's ``Store`` does no type validation, so a corrupted or wrong-shape
+    store file (for example a dict where a list is expected) would otherwise
+    flow straight into the message pipeline and raise deep in rendering. On
+    an unexpected type we log at ``error`` with the observed type and fall
+    back to an empty list. We deliberately do NOT rewrite the store here, so
+    the corrupt on-disk file is preserved for manual recovery and only a
+    later legitimate save replaces it with good data.
+    """
+    if stored is None:
+        return []
+    if not isinstance(stored, list):
+        _LOGGER.error(
+            "Discarding corrupt message store for %s: expected a list, got "
+            "%s — falling back to empty (on-disk file left intact)",
+            entity_id,
+            type(stored).__name__,
+        )
+        return []
+    return stored
+
+
 class MessageStore:
     """Per-conversation persistent message storage with lazy loading and idle eviction.
 
@@ -168,7 +192,21 @@ class MessageStore:
         (~100 bytes per conversation), not any conversation message data.
         """
         stored = await self._message_index_store.async_load()
-        self._message_index = stored or {}
+        # Validate the loaded shape: the index must be a dict. A corrupt or
+        # wrong-shape file is logged and discarded in memory (the on-disk
+        # file is left intact for manual recovery) rather than poisoning
+        # every later index lookup.
+        if stored is None:
+            self._message_index = {}
+        elif isinstance(stored, dict):
+            self._message_index = stored
+        else:
+            _LOGGER.error(
+                "Discarding corrupt message index: expected a dict, got %s "
+                "— falling back to empty (on-disk file left intact)",
+                type(stored).__name__,
+            )
+            self._message_index = {}
         _LOGGER.debug(
             "MessageStore index loaded: %d conversations tracked",
             len(self._message_index),
@@ -202,7 +240,7 @@ class MessageStore:
             return self._loaded_conversations[entity_id]
 
         stored = await self._store_for(entity_id).async_load()
-        messages: list[dict] = stored or []
+        messages: list[dict] = _coerce_message_list(stored, entity_id)
         # One-time backfill on first load — enriches old records that pre-date
         # the rx_log/delivery-status fixes. Persists on next save.
         if messages and _backfill_messages(
@@ -230,7 +268,7 @@ class MessageStore:
         if entity_id in self._loaded_conversations:
             return self._loaded_conversations[entity_id]
         stored = await self._store_for(entity_id).async_load()
-        return stored or []
+        return _coerce_message_list(stored, entity_id)
 
     # ── public API: writes ─────────────────────────────────────────────────
 
@@ -631,7 +669,12 @@ class MessageStore:
             self._eviction_timer.cancel()
             self._eviction_timer = None
 
-        # Save all dirty conversations.
+        # Save all dirty conversations. Track which saves raise so a failed
+        # save keeps its entity_id dirty for the next flush/eviction (passive
+        # retry) instead of silently dropping the unsaved data — the previous
+        # unconditional clear discarded the dirty flag even when the save
+        # never reached disk.
+        failed: dict[str, str] = {}
         for entity_id in list(self._conversation_dirty):
             if entity_id in self._loaded_conversations:
                 store = self._conversation_stores.get(entity_id)
@@ -640,11 +683,21 @@ class MessageStore:
                         await store.async_save(
                             self._loaded_conversations[entity_id]
                         )
-                    except Exception as ex:  # pragma: no cover - defensive
-                        _LOGGER.error(
-                            "Error flushing conversation %s: %s", entity_id, ex
-                        )
-        self._conversation_dirty.clear()
+                    except Exception as ex:
+                        failed[entity_id] = str(ex)
+        # Clear the dirty flags that persisted; retain only the failures so
+        # the next flush retries them. One aggregated error per flush keeps a
+        # permanently-broken store from flooding the log.
+        if failed:
+            _LOGGER.error(
+                "Flush: %d conversation(s) failed to save and remain queued "
+                "for the next flush: %s",
+                len(failed),
+                "; ".join(
+                    f"{eid}: {err}" for eid, err in sorted(failed.items())
+                ),
+            )
+        self._conversation_dirty = set(failed)
 
         # Save index.
         try:
@@ -683,10 +736,13 @@ class MessageStore:
                         del self._message_index[entity_id]
                 continue
 
-            # Not cached — load transiently, prune, save, discard.
+            # Not cached — load transiently, prune, save, discard. A corrupt
+            # (non-list) store is logged and skipped rather than raising
+            # mid-cleanup; a save failure is logged and the index is left
+            # untouched so the next run retries.
             store = self._store_for(entity_id)
             stored = await store.async_load()
-            messages = stored or []
+            messages = _coerce_message_list(stored, entity_id)
             original_count = len(messages)
             messages = [
                 m for m in messages if m.get("timestamp", "") > cutoff_iso
@@ -694,8 +750,17 @@ class MessageStore:
             trimmed = original_count - len(messages)
 
             if trimmed > 0:
+                try:
+                    await store.async_save(messages)
+                except Exception as ex:
+                    _LOGGER.error(
+                        "Error saving pruned conversation %s during retention "
+                        "cleanup (will retry next run): %s",
+                        entity_id,
+                        ex,
+                    )
+                    continue
                 total_pruned += trimmed
-                await store.async_save(messages)
                 if messages:
                     self._message_index[entity_id]["message_count"] = len(messages)
                 else:

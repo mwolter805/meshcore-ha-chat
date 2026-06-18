@@ -7,6 +7,10 @@ HA's Store helper.
 """
 from __future__ import annotations
 
+import logging
+from unittest.mock import patch
+
+import pytest
 from homeassistant.core import HomeAssistant
 
 from custom_components.meshcore_chat.channel_scopes import ChannelScopeStore
@@ -69,3 +73,25 @@ async def test_persistence_round_trip(hass: HomeAssistant) -> None:
     reloaded = ChannelScopeStore(hass)
     await reloaded.async_load()
     assert reloaded.get("entry_a", 2) == "cos"
+
+
+async def test_async_set_save_error_is_caught(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Store.async_save failure is logged, not raised.
+
+    ``async_set`` runs from a WS handler; an uncaught save failure would
+    propagate out of it. The in-memory map stays updated so the next
+    successful save persists the change.
+    """
+    caplog.set_level(logging.ERROR)
+    store = ChannelScopeStore(hass)
+    await store.async_load()
+
+    with patch.object(
+        store._store, "async_save", side_effect=OSError("disk full")
+    ):
+        await store.async_set("entry_a", 0, "waw")  # must not raise
+
+    assert store.get("entry_a", 0) == "waw"
+    assert "Failed to persist channel scope" in caplog.text

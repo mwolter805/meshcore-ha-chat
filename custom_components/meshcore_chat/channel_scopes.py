@@ -96,4 +96,17 @@ class ChannelScopeStore:
             if not per_entry:
                 del self._scopes[entry_id]
 
-        await self._store.async_save(self._scopes)
+        # A save failure must not propagate out of the WS handler that calls
+        # this (the in-memory map stays updated and the next successful save
+        # persists it); log it instead of raising uncaught.
+        try:
+            await self._store.async_save(self._scopes)
+        except Exception as ex:
+            _LOGGER.error(
+                "Failed to persist channel scope (entry=%s, channel=%s, "
+                "scope=%r): %s",
+                entry_id,
+                channel_idx,
+                scope,
+                ex,
+            )

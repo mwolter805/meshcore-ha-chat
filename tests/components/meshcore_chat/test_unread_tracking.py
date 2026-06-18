@@ -27,6 +27,9 @@ on-disk-equivalent payload assertion target.
 """
 from __future__ import annotations
 
+import logging
+from unittest.mock import patch
+
 import pytest
 from homeassistant.core import HomeAssistant
 
@@ -271,3 +274,27 @@ async def test_debounce_constant_matches_expected(hass: HomeAssistant) -> None:
     R6 worst-case loss window.
     """
     assert LAST_READ_SAVE_DEBOUNCE_MS == 2000
+
+
+async def test_flush_save_error_is_caught(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Store.async_save failure in ``_flush`` is logged, not raised.
+
+    ``_flush`` runs from a debounce-timer task and from
+    ``async_unload_entry``; an uncaught save failure there would surface
+    as an unhandled task exception or abort the unload. The in-memory
+    cursors are retained so a later save can retry.
+    """
+    caplog.set_level(logging.ERROR)
+    t = UnreadTracker(hass, ENTRY_ID)
+    await t.async_load()
+    await t.mark_read("binary_sensor.alice", "msg_1")
+
+    with patch.object(
+        t._store, "async_save", side_effect=OSError("disk full")
+    ):
+        await t._flush()  # must not raise
+
+    assert "Failed to persist last-read cursors" in caplog.text
+    assert t.get_last_read("binary_sensor.alice") == "msg_1"
