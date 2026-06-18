@@ -1554,7 +1554,7 @@ async def ws_set_channel(hass, connection, msg):
                 )
 
         # Re-fetch channel info so coordinator state matches the device
-        await coordinator._fetch_all_channel_info()
+        await coordinator.fetch_all_channel_info()
         coordinator.async_set_updated_data(coordinator.data)
 
         # Notify listeners (frontend subscribes to refresh its channel list).
@@ -1614,7 +1614,7 @@ async def ws_remove_channel(hass, connection, msg):
             )
 
         # Re-fetch channel info so coordinator state matches the device
-        await coordinator._fetch_all_channel_info()
+        await coordinator.fetch_all_channel_info()
         coordinator.async_set_updated_data(coordinator.data)
 
         # Notify listeners (frontend subscribes to refresh its channel list).

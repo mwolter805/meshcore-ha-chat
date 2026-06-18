@@ -126,7 +126,10 @@ def _make_coordinator(**attrs) -> MagicMock:
     coord._cleanup_stale_neighbors = AsyncMock(return_value=0)
     coord._cleanup_stale_discovered_contacts = AsyncMock(return_value=0)
     coord._save_neighbor_data = AsyncMock()
-    coord._fetch_all_channel_info = AsyncMock()
+    # PUBLIC on the upstream coordinator (the siblings above are still
+    # private). Mocking the public name pins it: a MagicMock would otherwise
+    # auto-create whatever name the handler calls, masking a rename.
+    coord.fetch_all_channel_info = AsyncMock()
     coord.async_set_updated_data = MagicMock()
     coord.api.self_info = {}
     coord.location_source = "manual"
@@ -1438,6 +1441,10 @@ async def test_ws_set_channel_happy(
     coordinator.api.mesh_core.commands.set_channel.assert_awaited_once_with(
         0, "myChan", None
     )
+    # Pin the PUBLIC coordinator refresh method — guards against an upstream
+    # rename slipping through (the handler used to call a now-removed private
+    # name, which a bare MagicMock accepted silently).
+    coordinator.fetch_all_channel_info.assert_awaited_once()
     assert conn.results[0][1] == {"success": True}
 
 
@@ -1484,6 +1491,7 @@ async def test_ws_remove_channel_happy(
     coordinator.api.mesh_core.commands.set_channel.assert_awaited_once_with(
         3, "", None
     )
+    coordinator.fetch_all_channel_info.assert_awaited_once()
     assert conn.results[0][1] == {"success": True}
 
 
