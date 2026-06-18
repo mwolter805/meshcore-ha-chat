@@ -6,9 +6,9 @@ A sidebar chat panel and persistent message store for the [MeshCore](https://mes
 
 Works as a **companion** to the [core meshcore integration](https://github.com/meshcore-dev/meshcore-ha) — install both. This integration does not drive the radio itself; it adds a chat UI, message persistence, and search on top of the events and services exposed by the core integration.
 
-> **Status:** v0.2 in active development.
+> **Status:** v0.3 in active development.
 
-## Features (v0.2)
+## Features (v0.3)
 
 - Sidebar chat panel with channels, DMs, and contact list
 - Persistent message history (survives Home Assistant restarts)
@@ -115,7 +115,7 @@ For a walkthrough of common tasks (adding contacts, managing channels, issuing c
 ## Requirements
 
 - Home Assistant 2024.12 or newer
-- The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) **v2.6.0 or newer** installed and configured. The chat companion calls the structured query services (`meshcore.get_contacts`, `meshcore.trace`) introduced in 2.6.0 (released 2026-04-27); on older versions the trace dialog returns a *"service not registered"* error and the contact list falls back to a legacy code path with a one-time warning in the logs.
+- The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) **v2.7.0 or newer** installed and configured. The per-channel region scope selector and the "All regions" option rely on the message `scope` argument and the inbound `region_scope` / `flood_scope` fields that landed in the core integration's v2.7.0 (released 2026-05-31). The chat companion also calls the structured query services (`meshcore.get_contacts`, `meshcore.trace`) introduced in 2.6.0; on a core older than the floor the trace dialog returns a *"service not registered"* error and the contact list falls back to a legacy code path with a one-time warning in the logs.
 
 ## Security
 
@@ -138,7 +138,7 @@ Security issues can be reported privately — see [SECURITY.md](SECURITY.md). Fo
 
 ## Known limitations
 
-- **Requires meshcore ≥ 2.6.0.** Older versions fall back to direct coordinator reads where supported, but Trace and Get Contacts use upstream services that landed in 2.6.0.
+- **Requires meshcore ≥ 2.7.0.** The per-channel region scope selector and "All regions" option need core-integration support that landed in v2.7.0; Trace and Get Contacts use upstream services from 2.6.0, and older cores fall back to direct coordinator reads where supported.
 - **Message archive is not a long-term log.** Default retention is 90 days, capped at 500 messages per conversation. Configurable via Settings → MeshCore Chat → Configure (range 1–365 days, 50–5000 messages).
 - **Discover-mode traces don't always return.** Flood path discovery on multi-hop routes sometimes silently drops. If a **Discover** trace fails, switch to **Select repeaters** or **Enter path** in the trace dialog to specify the route explicitly.
 

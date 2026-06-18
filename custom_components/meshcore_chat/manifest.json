@@ -9,5 +9,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/mwolter805/meshcore-ha-chat/issues",
   "requirements": [],
-  "version": "0.2.1"
+  "version": "0.3.0"
 }
