@@ -23,6 +23,7 @@ vi.mock('../src/api', () => ({
 import '../src/components/channel-dialog';
 import type { ChannelDialog } from '../src/components/channel-dialog';
 import type { FloodScopes, HomeAssistant } from '../src/types';
+import { sha256 } from '../src/chat/message-parser';
 
 const fakeHass = { callWS: vi.fn(), callService: vi.fn() } as unknown as HomeAssistant;
 
@@ -32,6 +33,7 @@ async function mountDialog(opts: {
   editMode?: boolean;
   initialScope?: string;
   initialChannelName?: string;
+  initialKey?: string;
 } = {}): Promise<ChannelDialog> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -47,6 +49,7 @@ async function mountDialog(opts: {
         .initialChannelIdx=${0}
         .initialChannelName=${opts.initialChannelName ?? ''}
         .initialScope=${opts.initialScope ?? ''}
+        .initialKey=${opts.initialKey ?? ''}
         .availableIndices=${[0, 1, 2]}
       ></meshcore-channel-dialog>
     `,
@@ -246,5 +249,56 @@ describe('channel-dialog region scope field', () => {
     await dialog.updateComplete;
 
     expect(mockGetFloodScopes).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves a custom key when editing (does not regenerate on save)', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw'], global: false });
+    const customKey = '00112233445566778899aabbccddeeff'; // not SHA256("general")[:16]
+    const dialog = await mountDialog({
+      editMode: true,
+      initialChannelName: 'general',
+      initialScope: 'waw',
+      initialKey: customKey,
+    });
+
+    // Auto-key is OFF and the custom key is loaded into the hex field.
+    const toggle = dialog.shadowRoot!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(toggle.hasAttribute('checked')).toBe(false);
+    const hexInput = dialog.shadowRoot!.querySelector('.hex-input') as HTMLInputElement;
+    expect(hexInput).not.toBeNull();
+    expect(hexInput.value).toBe(customKey);
+
+    // Save without touching the key → setChannel gets the existing custom key,
+    // NOT undefined (which would silently regenerate it as the auto-key).
+    const save = dialog.shadowRoot!.querySelector('.dialog-button.primary') as HTMLButtonElement;
+    save.click();
+    await dialog.updateComplete;
+
+    expect(mockSetChannel).toHaveBeenCalledWith(
+      fakeHass, 0, 'general', customKey, 'test-entry', 'waw',
+    );
+  });
+
+  it('keeps auto-key for an auto-keyed channel on edit', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw'], global: false });
+    const autoKey = sha256('general').slice(0, 32); // the SDK auto-key for "general"
+    const dialog = await mountDialog({
+      editMode: true,
+      initialChannelName: 'general',
+      initialScope: 'waw',
+      initialKey: autoKey,
+    });
+
+    const toggle = dialog.shadowRoot!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(toggle.hasAttribute('checked')).toBe(true);
+
+    const save = dialog.shadowRoot!.querySelector('.dialog-button.primary') as HTMLButtonElement;
+    save.click();
+    await dialog.updateComplete;
+
+    // Auto-keyed → key arg undefined, so the backend re-derives the same key.
+    expect(mockSetChannel).toHaveBeenCalledWith(
+      fakeHass, 0, 'general', undefined, 'test-entry', 'waw',
+    );
   });
 });

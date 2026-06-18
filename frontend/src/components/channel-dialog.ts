@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant } from '../types';
 import { setChannel, getFloodScopes } from '../api';
+import { sha256 } from '../chat/message-parser';
 import { panelStyles } from '../styles';
 import { attachDialogA11y } from '../utils/dialog-a11y';
 
@@ -22,6 +23,10 @@ export class ChannelDialog extends LitElement {
   @property({ type: Number }) initialChannelIdx = 0;
   @property({ type: String }) initialChannelName = '';
   @property({ type: String }) initialScope = '';
+  // The channel's current 16-byte key as 32 hex chars (from get_channels'
+  // `channel_secret`), passed in edit mode so the dialog can preserve a
+  // custom key instead of silently regenerating it on save.
+  @property({ type: String }) initialKey = '';
   @property({ type: Array }) availableIndices: number[] = [];
 
   @state() private _channelIdx = 0;
@@ -87,6 +92,20 @@ export class ChannelDialog extends LitElement {
         this._channelIdx = this.initialChannelIdx;
         this._channelName = this.initialChannelName;
         this._scope = this.initialScope;
+        // Preserve the channel's existing key. Auto-key derivation is
+        // SHA256(name)[:16] (matches the SDK's set_channel); if the stored
+        // secret equals that, the channel is auto-keyed and re-deriving on
+        // save reproduces the same key. If it differs, it's a custom key —
+        // load it and uncheck auto-key so editing (e.g. the scope) doesn't
+        // silently regenerate it and break the channel.
+        const autoKeyHex = sha256(this.initialChannelName).slice(0, 32);
+        if (this.initialKey && this.initialKey.toLowerCase() !== autoKeyHex) {
+          this._autoKey = false;
+          this._customKey = this.initialKey.toLowerCase();
+        } else {
+          this._autoKey = true;
+          this._customKey = '';
+        }
       } else {
         // Default to first available index
         this._channelIdx = this.availableIndices.length > 0 ? this.availableIndices[0] : 0;
