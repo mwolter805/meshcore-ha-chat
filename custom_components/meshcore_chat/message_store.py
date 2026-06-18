@@ -44,7 +44,7 @@ from .const import (
     STORAGE_KEY_INDEX,
     STORAGE_VERSION,
 )
-from .utils import enrich_rx_log_entries
+from .utils import enrich_rx_log_entries, hoist_flood_scope
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,21 +57,26 @@ def _safe_id(entity_id: str) -> str:
 def _backfill_messages(messages: list[dict]) -> bool:
     """One-time, in-place migration of stored records.
 
-    Three backfills:
+    Four backfills:
 
     1. Enrich rx_log entries with ``path_nodes``/``hop_count`` derived
        from ``path``/``path_len``. The upstream coordinator this companion
        consumes emits the raw fields but not the convenience aliases the
        frontend reads — so existing records show "0 hops" until enriched.
 
-    2. Promote stuck outgoing messages from ``delivery_status="pending"``
+    2. Hoist inbound region scope (``flood_scope``/``region_scope``) from
+       the per-repeater rx_log entries to a top-level record field, so
+       existing stored channel messages show their scope after this
+       migration without re-deriving from the array on every render.
+
+    3. Promote stuck outgoing messages from ``delivery_status="pending"``
        to ``"sent"`` when there's clear evidence the message hit the air
        (``repeater_count > 0`` or non-empty ``rx_log_data``). Pre-fix
        outgoing records all defaulted to "pending" and never advanced
        because progressive delivery_update events also defaulted to
        "pending". This unsticks them on next load.
 
-    3. Synth a single-entry ``rx_log_data`` for DMs that carry top-level
+    4. Synth a single-entry ``rx_log_data`` for DMs that carry top-level
        ``hop_count`` but no ``rx_log_data``. The frontend route popup keys
        off ``rx_log_data``; without this, DMs (which never get RX_LOG
        correlation) wouldn't show route metadata. Mirrors the live-message
@@ -86,6 +91,11 @@ def _backfill_messages(messages: list[dict]) -> bool:
             continue
         rx = m.get("rx_log_data")
         if rx and enrich_rx_log_entries(rx):
+            changed = True
+        # Hoist inbound region scope from the (now enriched) rx_log entries
+        # to a top-level field so existing stored channel messages show
+        # their scope after this migration runs.
+        if hoist_flood_scope(m):
             changed = True
         if (
             m.get("outgoing")
@@ -283,6 +293,11 @@ class MessageStore:
             if m.get("id") == message_id:
                 m["rx_log_data"] = rx_log_data
                 m["repeater_count"] = len(rx_log_data)
+                # Inbound channel-message scope rides in rx_log_data and is
+                # usually correlated *after* the message first stored, so
+                # re-hoist the top-level field on this late patch — the
+                # same place repeater_count is kept correct.
+                hoist_flood_scope(m)
                 self._conversation_dirty.add(entity_id)
                 self._schedule_conversation_save(entity_id)
                 return

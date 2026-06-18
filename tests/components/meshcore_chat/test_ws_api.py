@@ -582,11 +582,32 @@ async def test_ws_get_channels_merges_persisted_scope(
 async def test_ws_get_flood_scopes_parses_allowlist(
     hass: HomeAssistant, coordinator: MagicMock
 ) -> None:
-    """Comma-separated allowlist → trimmed names; sentinels and blanks dropped."""
+    """Comma-separated allowlist → trimmed names; the '*' wildcard becomes
+    the ``global`` flag; '#' and blanks are dropped."""
     coordinator.config_entry.data = {"flood_scopes": " waw, pl-mz ,, * , # "}
     conn = _Connection()
     await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
-    assert conn.results[0][1] == {"scopes": ["waw", "pl-mz"]}
+    assert conn.results[0][1] == {"scopes": ["waw", "pl-mz"], "global": True}
+
+
+async def test_ws_get_flood_scopes_global_flag_set(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """A '*' token sets global=True and stays out of the named-region list."""
+    coordinator.config_entry.data = {"flood_scopes": "*, pl-mz, pl-waw"}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
+    assert conn.results[0][1] == {"scopes": ["pl-mz", "pl-waw"], "global": True}
+
+
+async def test_ws_get_flood_scopes_global_flag_unset(
+    hass: HomeAssistant, coordinator: MagicMock
+) -> None:
+    """No '*' token → global=False; named regions returned as-is."""
+    coordinator.config_entry.data = {"flood_scopes": "pl-mz"}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
+    assert conn.results[0][1] == {"scopes": ["pl-mz"], "global": False}
 
 
 async def test_ws_get_flood_scopes_absent_key_returns_empty(
@@ -596,7 +617,7 @@ async def test_ws_get_flood_scopes_absent_key_returns_empty(
     coordinator.config_entry.data = {}
     conn = _Connection()
     await _call_ws(ws_api.ws_get_flood_scopes, hass, conn, {"id": 1})
-    assert conn.results[0][1] == {"scopes": []}
+    assert conn.results[0][1] == {"scopes": [], "global": False}
 
 
 async def test_ws_get_flood_scopes_error_no_coordinator(

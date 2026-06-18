@@ -6,8 +6,14 @@ import { html, render } from 'lit';
 // Mock the api module — channel-dialog imports setChannel and
 // getFloodScopes from '../src/api'. The scope allowlist each test
 // wants is set via mockGetFloodScopes.mockResolvedValue(...).
-const mockSetChannel = vi.fn(async () => ({ success: true }));
-const mockGetFloodScopes = vi.fn(async (): Promise<string[]> => []);
+// Rest params on the impls so the `(...args) => mock(...args)` forwarders
+// below spread into a rest parameter (otherwise tsc TS2556 on a fixed-arity
+// mock). The forwarder indirection is required: vi.mock's factory is hoisted
+// above these declarations, so it can't reference the mocks except lazily.
+const mockSetChannel = vi.fn(async (..._args: unknown[]) => ({ success: true }));
+const mockGetFloodScopes = vi.fn(
+  async (..._args: unknown[]): Promise<FloodScopes> => ({ scopes: [], global: false }),
+);
 vi.mock('../src/api', () => ({
   setChannel: (...args: unknown[]) => mockSetChannel(...args),
   getFloodScopes: (...args: unknown[]) => mockGetFloodScopes(...args),
@@ -16,7 +22,7 @@ vi.mock('../src/api', () => ({
 // Import AFTER vi.mock so the component resolves the mocked module.
 import '../src/components/channel-dialog';
 import type { ChannelDialog } from '../src/components/channel-dialog';
-import type { HomeAssistant } from '../src/types';
+import type { FloodScopes, HomeAssistant } from '../src/types';
 
 const fakeHass = { callWS: vi.fn(), callService: vi.fn() } as unknown as HomeAssistant;
 
@@ -69,7 +75,7 @@ function optionLabels(select: HTMLSelectElement): string[] {
 beforeEach(() => {
   mockSetChannel.mockClear();
   mockGetFloodScopes.mockClear();
-  mockGetFloodScopes.mockResolvedValue([]);
+  mockGetFloodScopes.mockResolvedValue({ scopes: [], global: false });
 });
 
 afterEach(() => {
@@ -78,19 +84,19 @@ afterEach(() => {
 });
 
 describe('channel-dialog region scope field', () => {
-  it('renders the allowlist as options with "No scope" first', async () => {
-    mockGetFloodScopes.mockResolvedValue(['waw', 'pl-mz']);
+  it('renders the allowlist as options with "All regions" first', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw', 'pl-mz'], global: false });
     const dialog = await mountDialog();
 
     const labels = optionLabels(scopeSelect(dialog));
-    expect(labels[0]).toBe('No scope (global flood)');
+    expect(labels[0]).toBe('All regions (global flood)');
     expect(labels).toContain('waw');
     expect(labels).toContain('pl-mz');
     expect(scopeSelect(dialog).disabled).toBe(false);
   });
 
   it('disables the select and shows the setup hint when the allowlist is empty', async () => {
-    mockGetFloodScopes.mockResolvedValue([]);
+    mockGetFloodScopes.mockResolvedValue({ scopes: [], global: false });
     const dialog = await mountDialog();
 
     expect(scopeSelect(dialog).disabled).toBe(true);
@@ -102,7 +108,7 @@ describe('channel-dialog region scope field', () => {
   });
 
   it('preselects the channel scope in edit mode', async () => {
-    mockGetFloodScopes.mockResolvedValue(['waw', 'pl-mz']);
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw', 'pl-mz'], global: false });
     const dialog = await mountDialog({
       editMode: true,
       initialChannelName: 'general',
@@ -118,7 +124,7 @@ describe('channel-dialog region scope field', () => {
   });
 
   it('keeps a persisted scope selectable when it is no longer in the allowlist', async () => {
-    mockGetFloodScopes.mockResolvedValue(['den']);
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['den'], global: false });
     const dialog = await mountDialog({
       editMode: true,
       initialChannelName: 'general',
@@ -133,7 +139,7 @@ describe('channel-dialog region scope field', () => {
   });
 
   it('passes the chosen scope to setChannel on save', async () => {
-    mockGetFloodScopes.mockResolvedValue(['waw']);
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw'], global: false });
     const dialog = await mountDialog();
 
     // Fill the name, pick the scope, save.
@@ -156,8 +162,8 @@ describe('channel-dialog region scope field', () => {
     );
   });
 
-  it('sends an empty scope on save when "No scope" is selected (clears persisted scope)', async () => {
-    mockGetFloodScopes.mockResolvedValue(['waw']);
+  it('sends an empty scope on save when the global row is selected and "*" is not allowlisted', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw'], global: false });
     const dialog = await mountDialog({
       editMode: true,
       initialChannelName: 'general',
@@ -178,8 +184,56 @@ describe('channel-dialog region scope field', () => {
     );
   });
 
+  it('renders "All regions (global flood)" and persists "*" when the wildcard is allowlisted', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['pl-mz'], global: true });
+    const dialog = await mountDialog();
+
+    const select = scopeSelect(dialog);
+    const labels = optionLabels(select);
+    expect(labels[0]).toBe('All regions (global flood)');
+    expect(labels).toContain('pl-mz');
+    // When "*" is allowlisted the global row carries the wildcard value,
+    // so selecting it persists "*" rather than an empty string.
+    const globalOption = select.querySelector('option') as HTMLOptionElement;
+    expect(globalOption.getAttribute('value')).toBe('*');
+
+    const nameInput = dialog.shadowRoot!.querySelector('.form-input') as HTMLInputElement;
+    nameInput.value = 'general';
+    nameInput.dispatchEvent(new Event('input'));
+    await dialog.updateComplete;
+
+    select.value = '*';
+    select.dispatchEvent(new Event('change'));
+    await dialog.updateComplete;
+
+    const save = dialog.shadowRoot!.querySelector('.dialog-button.primary') as HTMLButtonElement;
+    save.click();
+    await dialog.updateComplete;
+
+    expect(mockSetChannel).toHaveBeenCalledWith(
+      fakeHass, 0, 'general', undefined, 'test-entry', '*',
+    );
+  });
+
+  it('maps a persisted "*" to the All-regions row, not an orphan row', async () => {
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['pl-mz'], global: true });
+    const dialog = await mountDialog({
+      editMode: true,
+      initialChannelName: 'general',
+      initialScope: '*',
+    });
+
+    const select = scopeSelect(dialog);
+    // The wildcard must NOT render as an orphaned "(not in allowlist)" row.
+    expect(optionLabels(select)).not.toContain('* (not in allowlist)');
+    // It is represented by the canonical All-regions row, selected, value "*".
+    const marked = select.querySelector('option[selected]') as HTMLOptionElement;
+    expect(marked?.textContent?.trim()).toBe('All regions (global flood)');
+    expect(marked?.getAttribute('value')).toBe('*');
+  });
+
   it('re-fetches the allowlist on every open', async () => {
-    mockGetFloodScopes.mockResolvedValue(['waw']);
+    mockGetFloodScopes.mockResolvedValue({ scopes: ['waw'], global: false });
     const dialog = await mountDialog();
     expect(mockGetFloodScopes).toHaveBeenCalledTimes(1);
 

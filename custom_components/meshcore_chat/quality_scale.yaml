@@ -3,7 +3,7 @@
 # Home Assistant core inclusion. The file documents progress against
 # HA's published Integration Quality Scale rules
 # (https://developers.home-assistant.io/docs/core/integration-quality-scale/checklist)
-# so future contributors have a clear "what's done, what's exempt, what's
+# so contributors have a clear "what's done, what's exempt, what's
 # pending" view.
 
 rules:
@@ -21,8 +21,8 @@ rules:
     status: done
     comment: utils.py and unread_tracking.py provide cross-handler shared helpers.
   config-flow-test-coverage:
-    status: todo
-    comment: Tracked as Q04 in the HA Quality forensics report; backend test scaffolding is multi-session work.
+    status: done
+    comment: tests/components/meshcore_chat/test_config_flow.py covers the single-step flow and the single-instance abort.
   config-flow:
     status: done
     comment: |
@@ -32,20 +32,21 @@ rules:
   dependency-transparency:
     status: done
     comment: |
-      manifest.json declares all dependencies; README's Requirements
-      section documents the meshcore>=2.6.0 floor.
+      manifest.json declares its dependencies (runtime requirements is
+      empty); README's Requirements section documents the meshcore>=2.6.0
+      floor.
   docs-actions:
     status: exempt
     comment: No service actions registered.
   docs-high-level-description:
     status: done
-    comment: README opens with one-paragraph integration description.
+    comment: README opens with a one-paragraph integration description.
   docs-installation-instructions:
     status: done
-    comment: README has Installation section with both HACS and manual paths.
+    comment: README Installation section covers both HACS and manual paths.
   docs-removal-instructions:
-    status: todo
-    comment: Tracked as Q09 in the HA Quality forensics report; will land in Phase 3.
+    status: done
+    comment: README "## Removal" documents config-entry deletion and optional message-archive cleanup.
   entity-event-setup:
     status: exempt
     comment: Integration creates no entities.
@@ -56,17 +57,17 @@ rules:
     status: exempt
     comment: Integration creates no entities.
   runtime-data:
-    status: todo
-    comment: Tracked as Q01 in the HA Quality forensics report; will land in Phase 2.
+    status: done
+    comment: Per-entry state lives on entry.runtime_data via the MeshCoreChatRuntimeData dataclass (__init__.py); process-global state stays on hass.data[DOMAIN].
   test-before-configure:
     status: exempt
     comment: Single-step flow; nothing to "test" pre-configure.
   test-before-setup:
     status: done
     comment: |
-      ConfigEntryNotReady raised in async_setup_entry when upstream
-      meshcore has no coordinators yet (Phase 1 of HA Quality
-      Remediation, 2026-05-01).
+      ConfigEntryNotReady is raised in async_setup_entry when the upstream
+      meshcore integration has no active coordinators; HA retries setup
+      when the dependency becomes ready.
   unique-config-entry:
     status: done
     comment: |
@@ -81,8 +82,8 @@ rules:
     status: done
     comment: async_unload_entry implemented; per-entry teardown clean.
   docs-configuration-parameters:
-    status: todo
-    comment: Tracked as Q09 in the HA Quality forensics report.
+    status: done
+    comment: Retention tunables (days, max messages) are documented in README "## Known limitations" and INSTRUCTIONS "Adjusting message retention".
   docs-installation-parameters:
     status: done
     comment: Single-step config flow; INSTRUCTIONS.md covers what little there is.
@@ -93,12 +94,11 @@ rules:
     status: done
     comment: codeowners ["@mwolter805"] in manifest.json.
   log-when-unavailable:
-    status: partial
+    status: done
     comment: |
-      ConfigEntryNotReady covers the unavailable-coordinator case at setup
-      time. Runtime "upstream went away mid-life" detection is not
-      implemented; tracked as Q08 in the HA Quality forensics report
-      (repair-issues), landing in Phase 3.
+      ConfigEntryNotReady covers the unavailable-upstream case at setup, and
+      a repair issue (UpstreamMeshcoreUnavailableRepairFlow, created via
+      ir.async_create_issue) surfaces the runtime case.
   parallel-updates:
     status: exempt
     comment: No platforms.
@@ -106,16 +106,19 @@ rules:
     status: exempt
     comment: No authentication.
   test-coverage:
-    status: todo
-    comment: Tracked as Q04 in the HA Quality forensics report.
+    status: done
+    comment: |
+      pytest suite under tests/components/meshcore_chat/ covers config-flow,
+      setup/unload (test_init.py), the WebSocket API (test_ws_api.py, ~150
+      cases), message store, unread tracking, and channel scopes.
 
   # ─── Gold ────────────────────────────────────────────────────────────
   devices:
     status: exempt
     comment: Integration creates no devices; consumes upstream's.
   diagnostics:
-    status: todo
-    comment: Tracked as Q06 in the HA Quality forensics report; will land in Phase 3.
+    status: done
+    comment: diagnostics.py implements async_get_config_entry_diagnostics with entity-id redaction.
   discovery-update-info:
     status: exempt
     comment: No discovery surface.
@@ -123,26 +126,26 @@ rules:
     status: exempt
     comment: No discovery (meshcore upstream owns radio discovery).
   docs-data-update:
-    status: todo
-    comment: Tracked as Q09; will land in Phase 3.
+    status: done
+    comment: README intro and "Relationship to other projects" describe the event-driven model (consumes meshcore_message events; no polling).
   docs-examples:
-    status: todo
-    comment: Tracked as Q09; will land in Phase 3 if appetite.
+    status: done
+    comment: README "## Use cases" and INSTRUCTIONS "## Common tasks" provide worked examples.
   docs-known-limitations:
-    status: todo
-    comment: Tracked as Q09; will land in Phase 3.
+    status: done
+    comment: README "## Known limitations".
   docs-supported-devices:
     status: exempt
     comment: Integration is hardware-agnostic (whatever upstream meshcore supports).
   docs-supported-functions:
-    status: partial
-    comment: README Features section is high-level. INSTRUCTIONS.md covers the per-tab functionality. Could be more rigorous.
+    status: done
+    comment: README Features + Screenshots and INSTRUCTIONS per-tab walkthrough document the panel's functions.
   docs-troubleshooting:
-    status: partial
-    comment: README Tips & Troubleshooting section exists; could be expanded.
+    status: done
+    comment: README "## Tips & Troubleshooting" plus the INSTRUCTIONS troubleshooting section.
   docs-use-cases:
-    status: todo
-    comment: Tracked as Q09; will land in Phase 3.
+    status: done
+    comment: README "## Use cases".
   dynamic-devices:
     status: exempt
     comment: No devices.
@@ -159,8 +162,11 @@ rules:
     status: exempt
     comment: No entities.
   exception-translations:
-    status: todo
-    comment: Tracked as Q10 in the HA Quality forensics report; will land in Phase 6.
+    status: done
+    comment: |
+      User-facing WS errors resolve through translation keys; strings.json
+      and translations/en.json carry an "exceptions" block, surfaced via
+      _ws_send_error_safe / _t.
   icon-translations:
     status: exempt
     comment: No entities.
@@ -168,8 +174,8 @@ rules:
     status: partial
     comment: OptionsFlow handles runtime tunables. No separate reconfigure flow because there's nothing to reconfigure beyond the retention options.
   repair-issues:
-    status: todo
-    comment: Tracked as Q08; will land in Phase 3.
+    status: done
+    comment: repairs.py (UpstreamMeshcoreUnavailableRepairFlow) with ir.async_create_issue call sites in __init__.py and ws_api.py.
   stale-devices:
     status: exempt
     comment: No devices.
@@ -177,14 +183,13 @@ rules:
   # ─── Platinum ────────────────────────────────────────────────────────
   async-dependency:
     status: exempt
-    comment: No external Python dependencies (manifest requirements is empty).
+    comment: No runtime Python dependencies (manifest requirements is empty).
   inject-websession:
     status: exempt
-    comment: No external Python dependencies; no HTTP client to inject websession into.
+    comment: No runtime Python dependencies; no HTTP client to inject a websession into.
   strict-typing:
     status: todo
     comment: |
-      Integration uses type hints + `from __future__ import annotations`
-      consistently, but no `mypy --strict` configuration. Possible v0.2+
-      target; not currently tracked as a Q-finding because the gap is
-      hygienic rather than user-visible.
+      Integration uses type hints and `from __future__ import annotations`
+      throughout, but has no `mypy --strict` configuration or `py.typed`
+      marker. This is the one remaining open quality-scale item.

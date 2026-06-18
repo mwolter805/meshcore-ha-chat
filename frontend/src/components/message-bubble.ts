@@ -196,6 +196,12 @@ export class MessageBubble extends LitElement {
       color: inherit;
     }
 
+    .flood-scope {
+      color: inherit;
+      opacity: 0.85;
+      white-space: nowrap;
+    }
+
     .message-dialog-overlay {
       position: fixed;
       top: 0;
@@ -322,11 +328,20 @@ export class MessageBubble extends LitElement {
 
     const statusLabel = msg.isOutgoing && msg.deliveryStatus ? this._getStatusLabel(msg.deliveryStatus) : '';
     const ts = formatTimestamp(msg.timestamp, this.timestampFormat);
+    // Inbound region scope — incoming bubbles only. "*" → "🌐 all regions",
+    // a region name renders verbatim, absent renders nothing. The outbound
+    // scope is shown by the thread-header chip, so outgoing is unaffected.
+    const scopeLabel =
+      !msg.isOutgoing && !msg.isSystem && msg.floodScope
+        ? msg.floodScope === '*'
+          ? '🌐 all regions'
+          : msg.floodScope
+        : '';
 
     return html`
       <div class=${this._classMap(bubbleClasses)} data-msg-id=${msg.id} @click=${(e: Event) => { e.stopPropagation(); this._selectedMessage = msg; }}>
         <div class="message-text">${this._renderTextWithMentions(msg.text, msg.mentions)}</div>
-        <div class="timestamp">${statusLabel ? html`<span class="delivery-status">${statusLabel}</span> · ` : ''}${ts}</div>
+        <div class="timestamp">${statusLabel ? html`<span class="delivery-status">${statusLabel}</span> · ` : ''}${ts}${scopeLabel ? html` · <span class="flood-scope">${scopeLabel}</span>` : ''}</div>
       </div>
     `;
   }

@@ -7,6 +7,7 @@ import type {
   DeviceConfig,
   NeighborInfo,
   StoredMessage,
+  FloodScopes,
 } from './types';
 
 /**
@@ -314,22 +315,24 @@ export async function setChannel(
 
 /**
  * Region-scope allowlist from the upstream meshcore integration's
- * Global Settings. Empty when the allowlist is unconfigured or when
- * the installed meshcore predates the scope feature
- * (meshcore-dev/meshcore-ha#250) — the channel dialog shows setup
- * guidance in that case.
+ * Global Settings. `scopes` is empty (and `global` false) when the
+ * allowlist is unconfigured or when the installed meshcore predates the
+ * scope feature (meshcore-dev/meshcore-ha#250) — the channel dialog shows
+ * setup guidance in that case. `global` is true when the user listed the
+ * `*` wildcard, which the dialog renders as an explicit "All regions"
+ * choice.
  */
 export async function getFloodScopes(
   hass: HomeAssistant,
   entryId?: string,
-): Promise<string[]> {
+): Promise<FloodScopes> {
   try {
     const msg: Record<string, unknown> = { type: 'meshcore_chat/get_flood_scopes' };
     if (entryId) msg.entry_id = entryId;
-    const result = await hass.callWS<{ scopes: string[] }>(msg);
-    return result.scopes || [];
+    const result = await hass.callWS<{ scopes?: string[]; global?: boolean }>(msg);
+    return { scopes: result.scopes || [], global: !!result.global };
   } catch {
-    return [];
+    return { scopes: [], global: false };
   }
 }
 

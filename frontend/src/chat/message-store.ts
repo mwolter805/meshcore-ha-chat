@@ -6,7 +6,7 @@ import type {
   HassEvent,
   StoredMessage,
 } from '../types';
-import { generateId, extractMentions, toClientMessage } from './message-parser';
+import { generateId, extractMentions, toClientMessage, deriveFloodScope } from './message-parser';
 import { getMessagesAround } from '../api';
 import {
   CHANNEL_PREFIX_REGEX,
@@ -773,6 +773,10 @@ export class MessageStore {
           raw: text,
           mentions,
           rxLogData: rxLogData && rxLogData.length > 0 ? rxLogData : undefined,
+          // Show the inbound region scope immediately when the event
+          // already carries rx_log_data; the debounced store refetch
+          // reconciles to the hoisted top-level value otherwise.
+          ...deriveFloodScope(rxLogData),
         };
 
         this._messages.push(msg);

@@ -35,6 +35,10 @@ export class ChannelDialog extends LitElement {
   // user who adds scopes upstream and returns sees them without an
   // HA restart.
   @state() private _availableScopes: string[] | null = null;
+  // True when the upstream allowlist contains the "*" wildcard. Drives
+  // whether the canonical "All regions (global flood)" row persists "*"
+  // (opted in) or the empty string (both send an unscoped global flood).
+  @state() private _globalAllowed = false;
   @state() private _saving = false;
   @state() private _error: string | null = null;
 
@@ -99,9 +103,12 @@ export class ChannelDialog extends LitElement {
     this._availableScopes = null;
     if (!this.hass) {
       this._availableScopes = [];
+      this._globalAllowed = false;
       return;
     }
-    this._availableScopes = await getFloodScopes(this.hass, this.entryId);
+    const result = await getFloodScopes(this.hass, this.entryId);
+    this._availableScopes = result.scopes;
+    this._globalAllowed = result.global;
   }
 
   render() {
@@ -253,15 +260,26 @@ export class ChannelDialog extends LitElement {
       `;
     }
 
-    // A persisted scope that has since been removed from the upstream
-    // allowlist stays selectable, so editing the channel shows its real
-    // state and saving doesn't silently drop the scope.
-    const orphaned = !!this._scope && !scopes.includes(this._scope);
+    // The single canonical global row (panel reconciliation A). Its
+    // persisted value is "*" when the user allowlisted the wildcard, else
+    // the empty string — both send an unscoped global flood. A channel
+    // persisted with "*" maps to THIS row (selected), never an orphan,
+    // because get_flood_scopes surfaces "*" via the `global` flag rather
+    // than inside `scopes`.
+    const globalValue = this._globalAllowed ? '*' : '';
+    const globalSelected = !this._scope || this._scope === '*';
 
-    if (scopes.length === 0 && !orphaned) {
+    // A persisted named scope that has since been removed from the
+    // upstream allowlist stays selectable, so editing the channel shows
+    // its real state and saving doesn't silently drop the scope. "*" is
+    // handled by the global row above, so it is never treated as orphaned.
+    const orphaned =
+      !!this._scope && this._scope !== '*' && !scopes.includes(this._scope);
+
+    if (scopes.length === 0 && !orphaned && !this._globalAllowed) {
       return html`
         <select class="form-select scope-select" disabled>
-          <option selected>No scope (global flood)</option>
+          <option selected>All regions (global flood)</option>
         </select>
         <div class="form-description scope-empty-hint">
           No region scopes are configured yet. Add scope names in the
@@ -283,7 +301,7 @@ export class ChannelDialog extends LitElement {
         @change=${(e: Event) => {
           this._scope = (e.target as HTMLSelectElement).value;
         }}>
-        <option value="" ?selected=${!this._scope}>No scope (global flood)</option>
+        <option value=${globalValue} ?selected=${globalSelected}>All regions (global flood)</option>
         ${orphaned
           ? html`<option value=${this._scope} selected>${this._scope} (not in allowlist)</option>`
           : ''}
@@ -295,7 +313,7 @@ export class ChannelDialog extends LitElement {
       </select>
       <div class="form-description">
         Send this channel's messages only through repeaters configured
-        for the selected region. The default floods the whole mesh.
+        for the selected region. "All regions" floods the whole mesh.
       </div>
     `;
   }
@@ -359,6 +377,7 @@ export class ChannelDialog extends LitElement {
     this._autoKey = true;
     this._scope = '';
     this._availableScopes = null;
+    this._globalAllowed = false;
     this._error = null;
   }
 }

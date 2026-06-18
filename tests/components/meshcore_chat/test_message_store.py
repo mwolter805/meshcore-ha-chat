@@ -167,6 +167,52 @@ def test_backfill_skips_non_dict_entries() -> None:
     assert _backfill_messages(items) is False
 
 
+def test_backfill_hoists_global_flood_scope() -> None:
+    """A channel message scoped "*" hoists flood_scope/region_scope to the
+    top-level record (all per-repeater entries share one scope)."""
+    msg = {
+        "id": "fs1",
+        "rx_log_data": [
+            {"flood_scope": "*", "region_scope": False},
+            {"flood_scope": "*", "region_scope": False},
+        ],
+    }
+    assert _backfill_messages([msg]) is True
+    assert msg["flood_scope"] == "*"
+    assert msg["region_scope"] is False
+
+
+def test_backfill_hoists_region_flood_scope() -> None:
+    """A transport-scoped flood hoists the matched region name."""
+    msg = {
+        "id": "fs2",
+        "rx_log_data": [{"flood_scope": "pl-mz", "region_scope": True}],
+    }
+    assert _backfill_messages([msg]) is True
+    assert msg["flood_scope"] == "pl-mz"
+    assert msg["region_scope"] is True
+
+
+def test_backfill_unscoped_flood_hoists_region_scope_only() -> None:
+    """An unscoped flood (flood_scope None, region_scope False) hoists
+    region_scope but leaves flood_scope absent — the bubble shows nothing."""
+    msg = {
+        "id": "fs3",
+        "rx_log_data": [{"flood_scope": None, "region_scope": False}],
+    }
+    assert _backfill_messages([msg]) is True
+    assert "flood_scope" not in msg
+    assert msg["region_scope"] is False
+
+
+def test_backfill_dm_has_no_flood_scope() -> None:
+    """A DM (synthesized rx_log, no scope fields) gets no top-level scope."""
+    msg = {"id": "fs4", "hop_count": 2}
+    assert _backfill_messages([msg]) is True  # synth path changes it
+    assert "flood_scope" not in msg
+    assert "region_scope" not in msg
+
+
 # ─── store_message ─────────────────────────────────────────────────────
 
 
@@ -547,6 +593,30 @@ async def test_update_message_rx_data_sets_repeater_count(
     cached = await store._ensure_loaded("binary_sensor.eve")
     assert cached[0]["rx_log_data"] == rx
     assert cached[0]["repeater_count"] == 2
+
+
+async def test_update_message_rx_data_hoists_flood_scope(
+    store: MessageStore,
+) -> None:
+    """A late RX_LOG correlation patch hoists flood_scope onto a message
+    that carried no scope when first stored."""
+    await store.store_message(
+        "binary_sensor.eve",
+        {
+            "id": "rx2",
+            "timestamp": "2026-05-01T10:05:00",
+            "sender": "Eve",
+            "text": "scoped late",
+        },
+    )
+    before = await store._ensure_loaded("binary_sensor.eve")
+    assert "flood_scope" not in before[0]
+
+    rx = [{"hop_count": 1, "flood_scope": "*", "region_scope": False}]
+    await store.update_message_rx_data("binary_sensor.eve", "rx2", rx)
+    cached = await store._ensure_loaded("binary_sensor.eve")
+    assert cached[0]["flood_scope"] == "*"
+    assert cached[0]["repeater_count"] == 1
 
 
 async def test_update_message_delivery_no_match_is_noop(

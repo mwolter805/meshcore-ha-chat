@@ -83,6 +83,15 @@ export interface StoredMessage {
   ack_received?: boolean;
   repeater_count?: number;
   round_trip_ms?: number;
+  /**
+   * Inbound region scope, hoisted from the message's rx_log_data entries
+   * by the companion store. "*" = global flood (only when the user
+   * allowlisted "*"), a region name for a scoped flood, null/absent for an
+   * unscoped/unrecognized flood or a DM.
+   */
+  flood_scope?: string | null;
+  /** True when the received flood carried a transport region code. */
+  region_scope?: boolean;
   /** Present on search results only */
   entity_id?: string;
   /** Present on search results only */
@@ -125,6 +134,15 @@ export interface ChatMessage {
   deliveryStatus?: DeliveryStatus;
   /** Number of repeaters in message path */
   repeaterCount?: number;
+  /**
+   * Inbound region scope for a received channel message. "*" renders as
+   * "🌐 all regions", a region name renders verbatim, absent renders
+   * nothing. Incoming messages only — the outbound scope is shown by the
+   * thread-header scope chip.
+   */
+  floodScope?: string;
+  /** True when the received flood carried a transport region code. */
+  regionScope?: boolean;
   /** Color for sender identification */
   senderColor?: string;
 }
@@ -236,6 +254,20 @@ export interface Channel {
    * region. Absent = no scope (legacy global flood).
    */
   scope?: string;
+}
+
+/**
+ * Region-scope allowlist from meshcore/get_flood_scopes.
+ *
+ * `scopes` are the named regions a user can send to. `global` is true
+ * when the user listed the `*` wildcard in the upstream allowlist — the
+ * firmware's "all regions / global flood". The dialog renders one
+ * canonical "All regions (global flood)" row whose persisted value is
+ * `*` when `global` is true (else the empty string); both send unscoped.
+ */
+export interface FloodScopes {
+  scopes: string[];
+  global: boolean;
 }
 
 /**

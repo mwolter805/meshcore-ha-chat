@@ -792,12 +792,17 @@ def ws_get_flood_scopes(hass, connection, msg):
 
     Reads the comma-separated allowlist the user maintains in the
     meshcore integration's Global Settings (config-entry data key
-    ``flood_scopes``, added by meshcore-dev/meshcore-ha#250). Returns an
-    empty list when the allowlist is unconfigured or when the installed
-    meshcore predates the feature — the channel dialog renders its setup
-    guidance in that case, which also prevents configuring scoped sends
-    against an integration whose send_channel_message would reject the
-    scope argument.
+    ``flood_scopes``, added by meshcore-dev/meshcore-ha#250). Returns
+    ``{"scopes": [...named regions...], "global": <bool>}``. The
+    ``global`` flag is true when the allowlist contains the ``*``
+    wildcard, which the firmware treats as "all regions / global flood";
+    the dialog renders it as one explicit "All regions" choice rather
+    than mixing the sentinel into the named-region list. ``scopes`` is
+    empty (and ``global`` false) when the allowlist is unconfigured or
+    when the installed meshcore predates the feature — the channel dialog
+    renders its setup guidance in that case, which also prevents
+    configuring scoped sends against an integration whose
+    send_channel_message would reject the scope argument.
     """
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
     if not coordinator:
@@ -806,13 +811,23 @@ def ws_get_flood_scopes(hass, connection, msg):
 
     raw = coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
     scopes: list[str] = []
+    has_global = False
     if isinstance(raw, str):
         for part in raw.split(","):
             name = part.strip()
-            # "*" / "#" are reset/wildcard sentinels, not selectable regions.
-            if name and name not in ("*", "#"):
-                scopes.append(name)
-    connection.send_result(msg["id"], {"scopes": scopes})
+            if not name or name == "#":
+                # "#" is a parser sentinel and blanks are noise — neither
+                # is a selectable region.
+                continue
+            if name == "*":
+                # The wildcard is the explicit "all regions / global flood"
+                # choice. Surface it as a distinct flag rather than a named
+                # region so the dialog can render one canonical global
+                # option and the named-region list stays free of sentinels.
+                has_global = True
+                continue
+            scopes.append(name)
+    connection.send_result(msg["id"], {"scopes": scopes, "global": has_global})
 
 
 # ─── meshcore/get_managed_devices ───────────────────────────────────────

@@ -119,3 +119,54 @@ def enrich_rx_log_entries(rx_log_data):
             entry["hop_count"] = entry["path_len"]
             changed = True
     return changed
+
+
+def derive_flood_scope(rx_log_data) -> tuple[str | None, bool | None]:
+    """Derive one ``(flood_scope, region_scope)`` for a message from its
+    per-repeater rx_log entries.
+
+    The upstream meshcore integration stamps each rx_log entry of a
+    received channel message with ``flood_scope`` ("*" for a global flood
+    when the user allowlisted "*", a region name for a transport-scoped
+    flood, else None) and ``region_scope`` (True when the flood carried a
+    transport region code). All per-repeater entries of one received
+    message describe the same packet, so they share one scope — this
+    returns the first entry's values. Returns ``(None, None)`` when no
+    entry carries the fields: DMs, synthesized route entries, or messages
+    received before the integration stamped scope.
+    """
+    if not rx_log_data:
+        return None, None
+    flood_scope: str | None = None
+    region_scope: bool | None = None
+    for entry in rx_log_data:
+        if not isinstance(entry, dict):
+            continue
+        if flood_scope is None and entry.get("flood_scope") is not None:
+            flood_scope = entry["flood_scope"]
+        if region_scope is None and entry.get("region_scope") is not None:
+            region_scope = entry["region_scope"]
+    return flood_scope, region_scope
+
+
+def hoist_flood_scope(message: dict) -> bool:
+    """Hoist ``flood_scope``/``region_scope`` from a message's rx_log_data
+    to top-level record fields the frontend reads.
+
+    Channel-message scope is delivered per-repeater inside ``rx_log_data``,
+    which is frequently correlated and patched in *after* the bubble first
+    renders. Hoisting one value to the top of the record (the same place
+    ``repeater_count`` is kept correct) lets the panel show the scope
+    without re-deriving from the per-repeater array. No-op when the message
+    carries no rx_log scope (the fields stay absent). Mutates ``message``
+    in place; returns True if anything changed.
+    """
+    flood_scope, region_scope = derive_flood_scope(message.get("rx_log_data"))
+    changed = False
+    if flood_scope is not None and message.get("flood_scope") != flood_scope:
+        message["flood_scope"] = flood_scope
+        changed = True
+    if region_scope is not None and message.get("region_scope") != region_scope:
+        message["region_scope"] = region_scope
+        changed = True
+    return changed

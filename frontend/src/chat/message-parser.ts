@@ -111,9 +111,38 @@ export function extractMentions(text: string): string[] {
 }
 
 /**
+ * Derive the inbound region scope for a received channel message from its
+ * per-repeater rx_log entries. The upstream meshcore integration stamps
+ * each entry with `flood_scope` ("*" for a global flood, a region name for
+ * a scoped one, or null) and `region_scope`. All entries of one received
+ * message share one scope, so the first entry that carries the field wins.
+ * Used by the realtime ingest path and as a fallback in `toClientMessage`
+ * when the backend store hasn't hoisted the top-level field.
+ */
+export function deriveFloodScope(
+  rxLogData?: Array<Record<string, unknown>>,
+): { floodScope?: string; regionScope?: boolean } {
+  if (!rxLogData || rxLogData.length === 0) return {};
+  let floodScope: string | undefined;
+  let regionScope: boolean | undefined;
+  for (const entry of rxLogData) {
+    if (floodScope === undefined && typeof entry.flood_scope === 'string') {
+      floodScope = entry.flood_scope;
+    }
+    if (regionScope === undefined && typeof entry.region_scope === 'boolean') {
+      regionScope = entry.region_scope;
+    }
+  }
+  return { floodScope, regionScope };
+}
+
+/**
  * Convert a StoredMessage from the backend into a ChatMessage for the UI.
  */
 export function toClientMessage(stored: StoredMessage): ChatMessage {
+  // Prefer the backend-hoisted top-level scope; fall back to deriving from
+  // rx_log_data for records stored before the hoist ran.
+  const derived = deriveFloodScope(stored.rx_log_data);
   return {
     id: stored.id,
     sender: stored.sender,
@@ -133,6 +162,8 @@ export function toClientMessage(stored: StoredMessage): ChatMessage {
         }
       : undefined,
     repeaterCount: stored.repeater_count,
+    floodScope: stored.flood_scope ?? derived.floodScope,
+    regionScope: stored.region_scope ?? derived.regionScope,
   };
 }
 

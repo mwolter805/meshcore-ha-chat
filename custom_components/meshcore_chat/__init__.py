@@ -44,7 +44,7 @@ from .channel_scopes import ChannelScopeStore
 from .message_store import MessageStore
 from .panel import async_register_panel, async_remove_panel
 from .unread_tracking import EVENT_UNREAD_UPDATED, UnreadTracker
-from .utils import enrich_rx_log_entries
+from .utils import enrich_rx_log_entries, hoist_flood_scope
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -400,6 +400,11 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
         # not the convenience fields the frontend reads.
         if record.get("rx_log_data"):
             enrich_rx_log_entries(record["rx_log_data"])
+            # Mirror the store's scope hoist so a channel message that
+            # already carries rx_log_data at fire time shows its inbound
+            # region scope immediately (the late RX_LOG correlation patch
+            # re-hoists via MessageStore.update_message_rx_data).
+            hoist_flood_scope(record)
 
         # Route-popup synth for DMs. Channel messages get per-repeater rx_log_data
         # arrays via the upstream RX_LOG correlation pass; DMs don't — they
