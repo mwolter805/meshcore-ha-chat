@@ -9,6 +9,11 @@ on:
     # Weekly, Monday 03:00 UTC.
     - cron: "0 3 * * 1"
 
+# Default the workflow token to read-only; the analyze job escalates only
+# the scopes it needs (security-events: write) at job level.
+permissions:
+  contents: read
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
