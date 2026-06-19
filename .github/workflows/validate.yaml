@@ -9,6 +9,10 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+# Hassfest and HACS only need to read repository contents.
+permissions:
+  contents: read
+
 jobs:
   hassfest:
     name: Hassfest
