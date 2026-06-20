@@ -9,6 +9,10 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+# Hassfest and HACS only need to read repository contents.
+permissions:
+  contents: read
+
 jobs:
   hassfest:
     name: Hassfest
@@ -18,13 +22,13 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run hassfest
         # Pinned to 2026-04-07 HEAD on home-assistant/actions/master.
         # Bump on a quarterly cadence to take security and behaviour
         # fixes; verify with a full validate.yaml run after each bump.
-        uses: home-assistant/actions/hassfest@f6f29a7ee3fa0eccadf3620a7b9ee00ab54ec03b
+        uses: home-assistant/actions/hassfest@e91ad1948e57189485b9c1ad608af0c303946f89
 
   hacs:
     name: HACS
@@ -32,12 +36,12 @@ jobs:
     if: github.repository == 'mwolter805/meshcore-ha-chat'
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run HACS validation
         # Pinned to 2026-01-26 HEAD on hacs/action/main.
         # Bump on a quarterly cadence to take security and behaviour
         # fixes; verify with a full validate.yaml run after each bump.
-        uses: hacs/action@dcb30e72781db3f207d5236b861172774ab0b485
+        uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa
         with:
           category: integration
