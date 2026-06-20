@@ -28,6 +28,12 @@ export default {
       declaration: false,
       sourceMap: dev,
       include: ['src/**/*.ts'],
+      // @rollup/plugin-typescript v12 requires the TS `outDir` to resolve
+      // inside the rollup output file's directory. The bundle is emitted to
+      // ../custom_components/meshcore_chat/, so point outDir there (overrides
+      // tsconfig's ./dist). rollup writes the actual bundle; nothing is
+      // emitted loose because declaration is off.
+      outDir: '../custom_components/meshcore_chat',
     }),
     !dev &&
       terser({
