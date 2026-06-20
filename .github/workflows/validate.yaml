@@ -28,7 +28,7 @@ jobs:
         # Pinned to 2026-04-07 HEAD on home-assistant/actions/master.
         # Bump on a quarterly cadence to take security and behaviour
         # fixes; verify with a full validate.yaml run after each bump.
-        uses: home-assistant/actions/hassfest@f6f29a7ee3fa0eccadf3620a7b9ee00ab54ec03b
+        uses: home-assistant/actions/hassfest@e91ad1948e57189485b9c1ad608af0c303946f89
 
   hacs:
     name: HACS
