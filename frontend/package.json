@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.3",
-    "@rollup/plugin-terser": "^0.4.0",
+    "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^11.1.0",
     "happy-dom": "^20.10.6",
     "rollup": "^4.62.0",
