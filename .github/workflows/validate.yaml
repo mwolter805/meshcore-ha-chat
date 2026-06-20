@@ -45,3 +45,34 @@ jobs:
         uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa
         with:
           category: integration
+
+  frontend:
+    # Builds and tests the Lit panel bundle. CodeQL/Hassfest/HACS do not
+    # exercise the rollup build, so without this job a dependency bump
+    # that breaks `npm run build` can merge green (see plugin-typescript
+    # v12 outDir break, 2026-06). This job is the gate that catches it.
+    name: Frontend build & test
+    runs-on: ubuntu-latest
+    if: github.repository == 'mwolter805/meshcore-ha-chat'
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build bundle
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
