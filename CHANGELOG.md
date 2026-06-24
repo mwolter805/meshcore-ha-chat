@@ -4,6 +4,12 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-24
+
+### Fixed
+
+- **Blank sidebar panel on older Android System WebViews (GitHub issue #22).** The panel bundle is now down-leveled at build time so it parses on browser engines back to roughly 2018 (Chrome / Android System WebView 64, Safari 12). The Lit 3 runtime ships ES2021 logical-assignment syntax (`??=`, `||=`, `&&=`) that an Android System WebView older than Chromium 85 cannot parse, which left the panel blank in the Home Assistant Android companion app while it rendered correctly in a desktop browser. The build now runs the assembled bundle through `@babel/preset-env` against an explicit `browserslist` floor; behavior on modern engines is unchanged and no new runtime polyfills are added.
+
 ## [0.3.0] - 2026-06-18
 
 ### Fixed
