@@ -21,11 +21,11 @@
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^12.3.0",
-    "happy-dom": "^20.10.6",
-    "rollup": "^4.62.2",
+    "happy-dom": "^20.11.1",
+    "rollup": "^4.62.3",
     "tslib": "^2.6.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.10"
   },
   "browserslist": [
     "chrome >= 64",
