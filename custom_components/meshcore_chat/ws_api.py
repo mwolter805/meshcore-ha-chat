@@ -936,8 +936,8 @@ def ws_get_managed_devices(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
-@callback
-def ws_get_device_config(hass, connection, msg):
+@websocket_api.async_response
+async def ws_get_device_config(hass, connection, msg):
     """Return companion device config."""
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
     if not coordinator:
@@ -966,8 +966,37 @@ def ws_get_device_config(hass, connection, msg):
     config["longitude"] = self_info.get("adv_lon")
     config["altitude"] = None  # Not available in SDK - set_coords() hardcodes altitude to 0
 
-    # Advanced settings
-    config["path_hash_mode"] = self_info.get("path_hash_mode")
+    # Advanced settings - read Path Hash Mode from DEVICE_INFO
+    # Return None if the device does not provide a valid value.
+    config["path_hash_mode"] = None
+
+    try:
+        from meshcore.events import EventType
+
+        result = await coordinator.api.mesh_core.commands.send_device_query()
+        payload = getattr(result, "payload", None)
+
+        if (
+            getattr(result, "type", None) == EventType.DEVICE_INFO
+            and isinstance(payload, dict)
+        ):
+            device_mode = payload.get("path_hash_mode")
+
+            if type(device_mode) is int and device_mode in (0, 1, 2):
+                config["path_hash_mode"] = device_mode
+            else:
+                _LOGGER.debug(
+                    "Invalid Path Hash Mode in DEVICE_INFO: %r",
+                    device_mode,
+                )
+        else:
+            _LOGGER.debug("DEVICE_INFO unavailable for Path Hash Mode")
+
+    except Exception:
+        _LOGGER.debug(
+            "Failed to read Path Hash Mode from DEVICE_INFO",
+            exc_info=True,
+        )
 
     # Location source
     config["location_source"] = getattr(coordinator, "location_source", "manual")

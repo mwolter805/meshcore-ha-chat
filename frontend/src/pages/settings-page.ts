@@ -1100,6 +1100,14 @@ export class SettingsPage extends LitElement {
       'path_hash_mode',
     ]);
 
+    const currentPathHashMode =
+      this._editValues['path_hash_mode'] ??
+      this._deviceConfig.path_hash_mode;
+
+    const validPathHashMode =
+      typeof currentPathHashMode === 'number' &&
+      [0, 1, 2].includes(currentPathHashMode);
+
     return html`
       <div class="section-row">
         <div class="form-group-inline">
@@ -1177,12 +1185,28 @@ export class SettingsPage extends LitElement {
           <select
             class="form-select"
             @change=${(e: Event) => {
-              this._editValues['path_hash_mode'] = Number((e.target as HTMLSelectElement).value);
+              const value = (e.target as HTMLSelectElement).value;
+              if (value === '') return;
+
+              this._editValues = {
+                ...this._editValues,
+                path_hash_mode: Number(value),
+              };
             }}>
-            ${[[0, '0 - 1 byte'], [1, '1 - 2 byte'], [2, '2 - 3 byte']].map(([val, label]) => {
-              const current = this._editValues['path_hash_mode'] ?? this._deviceConfig!.path_hash_mode ?? 0;
-              return html`<option value=${val} ?selected=${Number(current) === val}>${label}</option>`;
-            })}
+            <option value="" disabled ?selected=${!validPathHashMode}>
+	      Unknown (unavailable)
+            </option>
+            ${([
+              [0, '0 - 1 byte'],
+              [1, '1 - 2 byte'],
+              [2, '2 - 3 byte'],
+            ] as const).map(([val, label]) => html`
+              <option
+                value=${val}
+		?selected=${validPathHashMode && currentPathHashMode === val}
+                ${label}
+              </option>
+            `)}
           </select>
         </div>
       </div>
