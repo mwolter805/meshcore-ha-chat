@@ -306,7 +306,7 @@ export interface DeviceConfig {
   latitude?: number;
   longitude?: number;
   altitude?: number;
-  path_hash_mode?: number;
+  path_hash_mode?: number | null;
   location_source?: 'manual' | 'gps' | 'home_assistant';
   connection_type?: string;
   connection_address?: string;
