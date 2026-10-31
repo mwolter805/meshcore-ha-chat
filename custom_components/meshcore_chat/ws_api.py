@@ -815,7 +815,10 @@ def ws_get_flood_scopes(hass, connection, msg):
     # global flood" flag (kept out of the named-region list) so the dialog
     # renders one canonical global option.
     scopes, has_global = parse_flood_scope_allowlist(
-        coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+        coordinator.config_entry.options.get(
+            CONF_FLOOD_SCOPES_UPSTREAM,
+            coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+        )
     )
     connection.send_result(msg["id"], {"scopes": scopes, "global": has_global})
 
