@@ -145,31 +145,28 @@ def parse_flood_scope_allowlist(raw: object) -> tuple[list[str], bool]:
     return scopes, has_global
 
 
-def wildcard_global_allowlisted(hass: HomeAssistant) -> bool:
-    """True when the upstream meshcore flood-scope allowlist contains ``'*'``.
+def entry_flood_scopes(config_entry) -> tuple[list[str], bool]:
+    """Read current options, retaining explicit clearing and older data."""
+    options = getattr(config_entry, "options", {}) or {}
+    raw = options.get(CONF_FLOOD_SCOPES_UPSTREAM) if CONF_FLOOD_SCOPES_UPSTREAM in options else config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
+    return parse_flood_scope_allowlist(raw)
 
-    The allowlist (``CONF_FLOOD_SCOPES_UPSTREAM``) lives on the *upstream*
-    meshcore config entry, which the companion consumes via
-    ``hass.data[MESHCORE_DOMAIN]`` — not on the chat's own entry. Reads the
-    first registered upstream coordinator; the allowlist is effectively
-    singleton config, and the inbound-ingest path carries no per-entry
-    context to scope it further. Returns False when no upstream coordinator
-    (or its config entry) is present.
 
-    Gates synthesizing the ``'*'`` "all regions" label at the inbound
-    self-derive call sites (live ingest in ``__init__`` and the
-    message-store migration / late-correlation paths), matching the opt-in
-    behavior of the dialog's scope picker.
-    """
-    for coord in (hass.data.get(MESHCORE_DOMAIN) or {}).values():
-        config_entry = getattr(coord, "config_entry", None)
-        if config_entry is None:
-            continue
-        _, has_global = parse_flood_scope_allowlist(
-            config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
-        )
-        return has_global
-    return False
+def wildcard_global_allowlisted(hass: HomeAssistant, entry_id: str | None = None) -> bool:
+    """Read one radio's global-label preference; ambiguous radios opt out."""
+    coordinators = hass.data.get(MESHCORE_DOMAIN) or {}
+    if entry_id is not None:
+        coordinator = coordinators.get(entry_id)
+    else:
+        candidates = [c for c in coordinators.values() if getattr(c, "config_entry", None) is not None]
+        coordinator = candidates[0] if len(candidates) == 1 else None
+    entry = getattr(coordinator, "config_entry", None)
+    return entry_flood_scopes(entry)[1] if entry is not None else False
+
+
+def message_sender(data: dict) -> str:
+    """Use the sender identity when the advertised name is unavailable."""
+    return str(data.get("sender_name") or data.get("sender") or data.get("pubkey_prefix") or data.get("contact_public_key") or "Unknown")
 
 
 def derive_flood_scope(

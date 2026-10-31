@@ -481,7 +481,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
         required: true,
       },
       {
-        name: 'name',
+        name: 'channel_name',
         type: 'string',
         description: 'Channel name (use # prefix for auto-derived key)',
         required: true,
@@ -536,13 +536,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name, public key prefix, or full public key',
         required: true,
       },
       {
-        name: 'message',
+        name: 'msg',
         type: 'string',
         description: 'Message text',
         required: true,
@@ -555,13 +555,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name, public key prefix, or full public key',
         required: true,
       },
       {
-        name: 'message',
+        name: 'msg',
         type: 'string',
         description: 'Message text',
         required: true,
@@ -574,13 +574,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'channel',
+        name: 'chan',
         type: 'number',
         description: 'Channel index',
         required: true,
       },
       {
-        name: 'message',
+        name: 'msg',
         type: 'string',
         description: 'Message text',
         required: true,
@@ -593,13 +593,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name, public key prefix, or full public key',
         required: true,
       },
       {
-        name: 'command',
+        name: 'cmd',
         type: 'string',
         description: 'CLI command to execute on remote node',
         required: true,
@@ -612,13 +612,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
       },
       {
-        name: 'password',
+        name: 'pwd',
         type: 'string',
         description: 'Admin password',
         required: true,
@@ -631,7 +631,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Messaging',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -648,7 +648,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -661,7 +661,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -674,7 +674,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -837,7 +837,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'key',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -850,7 +850,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'key',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -863,7 +863,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'key',
         type: 'string',
         description: 'Contact name or public key (optional, defaults to self)',
         required: false,
@@ -889,7 +889,7 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'key',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
@@ -1002,13 +1002,13 @@ export const LOCAL_COMMANDS: CommandDef[] = [
     category: 'Advanced',
     params: [
       {
-        name: 'contact',
+        name: 'dst',
         type: 'string',
         description: 'Contact name or public key',
         required: true,
       },
       {
-        name: 'req_type',
+        name: 'request_type',
         type: 'number',
         description: 'Binary request type',
         required: true,

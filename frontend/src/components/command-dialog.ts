@@ -594,7 +594,7 @@ export class CommandDialog extends LitElement {
   }
 
   updated(changed: Map<string, unknown>) {
-    if (changed.has('open') || changed.has('targetPrefix') || changed.has('isLocal')) {
+    if (changed.has('open') || changed.has('targetPrefix') || changed.has('isLocal') || changed.has('entryId')) {
       // Restart the feed on any relevant change: stop the old subscription,
       // then (re)subscribe if the dialog is open against a remote device.
       this._stopResponseFeed();
@@ -615,8 +615,12 @@ export class CommandDialog extends LitElement {
    *  request/response correlation, so this surfaces "responses from the
    *  device since the command was issued," not a guaranteed reply to a
    *  specific command. */
+  private _feedGeneration = 0;
+
   private async _startResponseFeed() {
     if (this._feedActive || this.isLocal || !this.open || !this.hass?.connection) return;
+    const generation = ++this._feedGeneration;
+    const entryId = this.entryId;
     this._feedActive = true;
     this._feedSince = Date.now();
     // Avoid a redundant reactive write (and the resulting extra update cycle)
@@ -625,7 +629,10 @@ export class CommandDialog extends LitElement {
     if (this._deviceResponses.length) this._deviceResponses = [];
     try {
       const unsub = await this.hass.connection.subscribeEvents((event: HassEvent) => {
+        if (generation !== this._feedGeneration || !this.open || this.isLocal) return;
         const d = event.data;
+        if (entryId && (d.entry_id ?? d.device) !== entryId) return;
+        if (d.outgoing === true) return;
         if (!this._prefixMatches(d.pubkey_prefix as string | undefined)) return;
         if ((d.sender_name as string) === this.nodeName) return; // skip outgoing echo
         const ts = Date.parse((d.timestamp as string) ?? '') || Date.now();
@@ -641,18 +648,18 @@ export class CommandDialog extends LitElement {
         ];
       }, 'meshcore_message');
       // The dialog may have closed while subscribeEvents was awaiting.
-      if (!this.open || this.isLocal) {
+      if (generation !== this._feedGeneration || !this.open || this.isLocal) {
         unsub();
-        this._feedActive = false;
         return;
       }
       this._unsubMsg = unsub;
     } catch {
-      this._feedActive = false;
+      if (generation === this._feedGeneration) this._feedActive = false;
     }
   }
 
   private _stopResponseFeed() {
+    this._feedGeneration++;
     if (this._unsubMsg) {
       this._unsubMsg();
       this._unsubMsg = null;

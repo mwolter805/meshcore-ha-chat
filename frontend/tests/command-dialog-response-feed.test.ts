@@ -21,6 +21,7 @@ interface DialogEl extends HTMLElement {
   isLocal: boolean;
   targetPrefix?: string;
   nodeName: string;
+  entryId?: string;
   _deviceResponses: Array<{ text: string; sender: string; ts: number; snr?: number }>;
   updateComplete: Promise<boolean>;
 }
@@ -82,6 +83,28 @@ describe('command-dialog device response feed', () => {
   it('subscribes once to meshcore_message when a remote dialog opens', async () => {
     await openRemote();
     expect(subscribeEventTypes).toEqual(['meshcore_message']);
+  });
+
+  it('isolates radios sharing the same target and rejects late replies after a switch', async () => {
+    el.entryId = 'radio-a';
+    await openRemote();
+    const oldCallback = capturedCb!;
+    fireEvent({ entry_id: 'radio-b', pubkey_prefix: 'rpt1deadbeef', message: 'wrong radio' });
+    expect(el._deviceResponses).toHaveLength(0);
+    fireEvent({ entry_id: 'radio-a', pubkey_prefix: 'rpt1deadbeef', message: 'right radio' });
+    expect(el._deviceResponses).toHaveLength(1);
+    el.entryId = 'radio-b';
+    await el.updateComplete;
+    await flush();
+    expect(el._deviceResponses).toHaveLength(0);
+    oldCallback({ data: { entry_id: 'radio-a', pubkey_prefix: 'rpt1deadbeef', message: 'late' } } as HassEvent);
+    expect(el._deviceResponses).toHaveLength(0);
+    fireEvent({ entry_id: 'radio-b', pubkey_prefix: 'rpt1deadbeef', message: 'new radio' });
+    expect(el._deviceResponses).toHaveLength(1);
+    el.open = false;
+    await el.updateComplete;
+    fireEvent({ entry_id: 'radio-b', pubkey_prefix: 'rpt1deadbeef', message: 'after close' });
+    expect(el._deviceResponses).toHaveLength(1);
   });
 
   it('appends a matching inbound device reply to the feed', async () => {

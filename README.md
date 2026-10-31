@@ -114,7 +114,7 @@ For a walkthrough of common tasks (adding contacts, managing channels, issuing c
 
 ## Requirements
 
-- Home Assistant 2024.12 or newer
+- Home Assistant 2025.6 or newer
 - The core [meshcore integration](https://github.com/meshcore-dev/meshcore-ha) **v2.7.0 or newer** installed and configured. The per-channel region scope selector and the "All regions" option rely on the message `scope` argument and the inbound `region_scope` / `flood_scope` fields that landed in the core integration's v2.7.0 (released 2026-05-31). The chat companion also calls the structured query services (`meshcore.get_contacts`, `meshcore.trace`) introduced in 2.6.0; on a core older than the floor the trace dialog returns a *"service not registered"* error and the contact list falls back to a legacy code path with a one-time warning in the logs.
 
 ## Security

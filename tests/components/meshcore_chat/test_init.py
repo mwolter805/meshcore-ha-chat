@@ -388,7 +388,7 @@ async def test_delivery_handler_progressive_only_writes_rx_log(
     config_entry: MockConfigEntry,
     mock_store: MagicMock,
 ) -> None:
-    """progressive=True with rx_log_data → only update_message_rx_data is called."""
+    """Progressive metadata updates preserve the stored delivery status."""
     handler = _make_delivery_update_handler(hass, config_entry.entry_id)
     await handler(_make_event({
         "id": "m1",
@@ -396,8 +396,10 @@ async def test_delivery_handler_progressive_only_writes_rx_log(
         "progressive": True,
         "rx_log_data": [{"path": "ab", "path_len": 1}],
     }))
-    mock_store.update_message_delivery.assert_not_called()
-    mock_store.update_message_rx_data.assert_awaited_once()
+    args, kwargs = mock_store.update_message_delivery.await_args
+    assert args == ("binary_sensor.alice", "m1", None)
+    assert kwargs["collecting"] is True
+    assert kwargs["rx_log_data"][0]["hop_count"] == 1
 
 
 async def test_delivery_handler_falls_back_to_cross_conversation_scan(
@@ -416,12 +418,9 @@ async def test_delivery_handler_falls_back_to_cross_conversation_scan(
         "rx_log_data": [{"hop_count": 1}],
     }))
     mock_store.update_message_delivery_any.assert_awaited_once()
-    # Located conversation gets the rx_data update too.
-    mock_store.update_message_rx_data.assert_awaited_once()
-    assert (
-        mock_store.update_message_rx_data.await_args.args[0]
-        == "binary_sensor.found"
-    )
+    args, kwargs = mock_store.update_message_delivery_any.await_args
+    assert args == ("m1", "delivered")
+    assert kwargs["rx_log_data"] == [{"hop_count": 1}]
 
 
 async def test_delivery_handler_skips_when_no_id(
@@ -448,19 +447,19 @@ async def test_delivery_handler_skips_when_store_missing(
     mock_store.update_message_delivery.assert_not_called()
 
 
-async def test_delivery_handler_status_pending_when_no_ack(
+async def test_delivery_handler_retains_status_when_type_and_ack_absent(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     mock_store: MagicMock,
 ) -> None:
-    """Non-progressive event with no explicit status & no ack → 'pending'."""
+    """An older event without a message type must not invent a new status."""
     handler = _make_delivery_update_handler(hass, config_entry.entry_id)
     await handler(_make_event({
         "id": "m1",
         "entity_id": "binary_sensor.x",
     }))
     args, _ = mock_store.update_message_delivery.await_args
-    assert args[2] == "pending"
+    assert args[2] is None
 
 
 # ─── _make_connection_state_handler ────────────────────────────────────

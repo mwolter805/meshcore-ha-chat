@@ -14,4 +14,4 @@ A **companion** integration: works alongside the [core meshcore integration](htt
 - Per-conversation search
 - Unread counts and delivery status
 
-**Requires:** Home Assistant 2024.12+, the core meshcore integration installed and configured.
+**Requires:** Home Assistant 2025.6+, the core meshcore integration installed and configured.

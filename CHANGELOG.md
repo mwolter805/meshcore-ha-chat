@@ -4,6 +4,33 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - Unreleased
+
+### Compatibility
+
+- Require Home Assistant 2025.6 or newer, matching the core meshcore integration. The meshcore-ha minimum remains v2.7.0.
+- Use the parent integration's command service on newer parents, preserving its permissions, selected radio and command error responses.
+- Restore administrator-confirmed identity import and regeneration through the current parent connection, with coordinated commands, validated reconnection and verification after reload. Supported legacy behavior is retained.
+
+### Fixed
+
+- Keep the Nodes view working alongside the separate MeshCore card by using a distinct internal contact component name.
+- Preserve completed channel delivery states and repeat-observation metadata. Show collecting, unobservable and observed-zero states separately.
+- Match delivery updates by send ID when supplied. Preserve a failed local send and its draft when its service call reports an error, without marking a different server message failed.
+- Keep first message loads and delivery updates from discarding each other's changes.
+- Read region settings from the selected radio's current options, including an explicitly cleared region list.
+- Scope device lookup and remote command replies to the selected radio. Refresh the discovered-contact cache after clearing contacts and support synchronous neighbor-save scheduling.
+- Show unnamed incoming direct messages immediately and keep the CLI Console counter out of telemetry displays.
+- Read the actual Path Hash Mode through the parent command service. Show Unknown for failed or unsupported reads, validate modes strictly, and ignore stale Settings reads or saves after a radio switch. Thanks to [@vharbich](https://github.com/vharbich) for [PR #49](https://github.com/mwolter805/meshcore-ha-chat/pull/49).
+- Preserve rejection of oversized UTF-8 messages and keep the composed text available; do not silently split or truncate messages.
+
+### Known limitations
+
+- A send that returns normally while the radio is offline can still remain unresolved. Failure events without a message identifier cannot safely identify which message failed.
+- Initial success-event association can still rely on message text. Locally failed bubbles and recovery drafts stay in page memory and do not change persisted server delivery facts.
+- Parent log handling is unchanged. The Path Hash Mode response sent to the browser includes only the validated mode.
+- Local checks cover selected HA versions and parent contracts, not every version combination. Physical mode accuracy, all-mode saving and persistence, identity hardware/key persistence and the newer identity flow on the older HA floor remain unverified. This SPI-free artifact has not been installed or tested on a live host or physical phone.
+
 ## [0.3.1] - 2026-06-24
 
 ### Fixed

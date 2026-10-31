@@ -116,6 +116,8 @@ function makeStored(
 // invariants like `_pollFetch`'s guard without inflating the public
 // surface for tests-only use.
 interface PrivateMessageStore {
+  _fetchMessages(entityId: string): Promise<void>;
+  _fetchAroundAnchor(entityId: string, anchorId: string): Promise<void>;
   _handleRealtimeMessage(d: Record<string, unknown>): void;
   _pollFetch(entityId: string): Promise<void>;
   _hasNewerMessages: boolean;
@@ -142,6 +144,101 @@ afterEach(() => {
 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────
+
+describe.each(['newest', 'anchor'] as const)('rejected repeated-text hydration: %s', (path) => {
+  const fetch = (store: MessageStore) => path === 'newest'
+    ? priv(store)._fetchMessages('conversation')
+    : priv(store)._fetchAroundAnchor('conversation', 'old');
+
+  it('retains a rejection across delayed and duplicate older success replies', async () => {
+    const older = { ...makeStored('old', '2020-01-01T00:00:00Z', 'Radio', 'same'), outgoing: true, send_id: 'old-send' };
+    let finish!: (result: unknown) => void;
+    const store = track(new MessageStore(makeConfig()));
+    store.setHass(makeMockHass({ callWS: () => new Promise(resolve => { finish = resolve; }) }));
+    const rejected = store.addOptimisticMessage('Radio', 'same');
+    const loading = fetch(store);
+    store.markOptimisticFailed(rejected);
+    for (let duplicate = 0; duplicate < 2; duplicate++) {
+      priv(store)._handleRealtimeMessage({ outgoing: true, sender: 'Radio', message: 'same', send_id: 'old-send' });
+    }
+    expect(store.messages.find(m => m.id === rejected)?.sendId).toBeUndefined();
+    finish({ messages: [older], has_more: false, has_more_before: false, has_more_after: false });
+    await loading;
+    expect(store.messages.find(m => m.id === rejected)?.deliveryStatus?.status).toBe('failed');
+    expect(store.messages.find(m => m.id === 'old')?.sendId).toBe('old-send');
+    const refresh = fetch(store);
+    finish({ messages: [older], has_more: false, has_more_before: false, has_more_after: false });
+    await refresh;
+    expect(store.messages.filter(m => m.id === rejected)).toHaveLength(1);
+  });
+
+  it('reconciles a success association without consuming a different failed send', async () => {
+    const stored = { ...makeStored('stored-new', '2026-01-01T00:00:00Z', 'Radio', 'same'), outgoing: true, send_id: 'new-send' };
+    const store = track(new MessageStore(makeConfig()));
+    store.setHass(makeMockHass({ callWS: async () => ({ messages: [stored], has_more: false, has_more_before: false, has_more_after: false }) }));
+    const failed = store.addOptimisticMessage('Radio', 'same');
+    store.markOptimisticFailed(failed);
+    const pending = store.addOptimisticMessage('Radio', 'same');
+    priv(store)._handleRealtimeMessage({ outgoing: true, sender: 'Radio', message: 'same', send_id: 'new-send' });
+    expect(store.messages.find(m => m.id === pending)?.sendId).toBe('new-send');
+    await fetch(store);
+    expect(store.messages.find(m => m.id === failed)?.deliveryStatus?.status).toBe('failed');
+    expect(store.messages.some(m => m.id === pending)).toBe(false);
+    expect(store.messages.some(m => m.id === 'stored-new')).toBe(true);
+    expect(store.messages.find(m => m.id === 'stored-new')?.deliveryStatus?.status).toBe('delivered');
+  });
+
+  it('never treats a late automation event ID as the rejected call identity', async () => {
+    const stored = { ...makeStored('old-success', '2020-01-01T00:00:00Z', 'Radio', 'same'), outgoing: true, send_id: 'unrelated-old-send', delivery_status: 'sent' as const };
+    const store = track(new MessageStore(makeConfig()));
+    store.setHass(makeMockHass({ callWS: async () => ({ messages: [stored], has_more: false, has_more_before: false, has_more_after: false }) }));
+    const local = store.addOptimisticMessage('Radio', 'same');
+    for (let duplicate = 0; duplicate < 2; duplicate++) {
+      priv(store)._handleRealtimeMessage({ outgoing: true, sender: 'Radio', message: 'same', send_id: 'unrelated-old-send' });
+    }
+    store.markOptimisticFailed(local);
+    for (let refresh = 0; refresh < 3; refresh++) {
+      await fetch(store);
+      expect(store.messages).toHaveLength(2);
+      expect(store.messages.find(m => m.id === 'old-success')?.deliveryStatus?.status).toBe('sent');
+      expect(store.messages.find(m => m.id === local)?.deliveryStatus?.status).toBe('failed');
+      expect(store.messages.find(m => m.id === local)?.sendId).toBeUndefined();
+    }
+  });
+
+  it('restores only the local rejection after history replaced its optimistic row', async () => {
+    const stored = { ...makeStored('old-success', '2020-01-01T00:00:00Z', 'Radio', 'same'), outgoing: true, send_id: 'automation-send' };
+    const store = track(new MessageStore(makeConfig()));
+    store.setHass(makeMockHass({ callWS: async () => ({ messages: [stored], has_more: false, has_more_before: false, has_more_after: false }) }));
+    const local = store.addOptimisticMessage('Radio', 'same');
+    priv(store)._handleRealtimeMessage({ outgoing: true, sender: 'Radio', message: 'same', send_id: 'automation-send' });
+    await fetch(store);
+    expect(store.messages.some(m => m.id === local)).toBe(false);
+    store.markOptimisticFailed(local);
+    for (let refresh = 0; refresh < 3; refresh++) {
+      await fetch(store);
+      expect(store.messages).toHaveLength(2);
+      expect(store.messages.find(m => m.id === local)?.deliveryStatus?.status).toBe('failed');
+      expect(store.messages.find(m => m.id === local)?.sendId).toBeUndefined();
+      expect(store.messages.find(m => m.id === 'old-success')?.deliveryStatus?.status).toBe('delivered');
+    }
+  });
+});
+
+it.each(['radio', 'conversation'] as const)('does not carry a rejected identity into another %s', async (change) => {
+  const stored = { ...makeStored('stored', '2026-01-01T00:00:00Z', 'Radio', 'same'), outgoing: true, send_id: 'shared-id' };
+  const store = track(new MessageStore(makeConfig({ entry_id: 'a' })));
+  store.setHass(makeMockHass({ callWS: async () => ({ messages: [stored], has_more: false }) }));
+  const local = store.addOptimisticMessage('Radio', 'same');
+  priv(store)._handleRealtimeMessage({ outgoing: true, sender: 'Radio', message: 'same', send_id: 'shared-id' });
+  store.markOptimisticFailed(local);
+  await priv(store)._fetchMessages('first');
+  expect(store.messages.find(m => m.id === local)?.deliveryStatus?.status).toBe('failed');
+  if (change === 'radio') store.setConfig(makeConfig({ entry_id: 'b' }));
+  else await store.switchEntity('second');
+  await priv(store)._fetchMessages('second');
+  expect(store.messages[0].deliveryStatus?.status).toBe('delivered');
+});
 
 describe('MessageStore Phase 3 — switchEntity with anchor', () => {
   it('routes through meshcore_chat/get_messages_around and hydrates messages', async () => {

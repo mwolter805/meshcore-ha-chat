@@ -69,6 +69,9 @@ export interface HassEvent {
  * Returned by meshcore/get_stored_messages and meshcore/search_stored_messages.
  */
 export interface StoredMessage {
+  send_id?: string;
+  repeats_observable?: boolean;
+  collecting?: boolean;
   id: string;
   sender: string;
   text: string;
@@ -102,6 +105,8 @@ export interface StoredMessage {
  * Delivery status for messages
  */
 export interface DeliveryStatus {
+  repeatsObservable?: boolean;
+  collecting?: boolean;
   status: 'pending' | 'waiting' | 'sent' | 'delivered' | 'unconfirmed' | 'failed';
   repeaterCount?: number;
   ackReceived?: boolean;
@@ -112,6 +117,7 @@ export interface DeliveryStatus {
  * Parsed chat message
  */
 export interface ChatMessage {
+  sendId?: string;
   /** Unique ID (hash of timestamp + sender + text) */
   id: string;
   /** Parsed sender name */
@@ -306,7 +312,7 @@ export interface DeviceConfig {
   latitude?: number;
   longitude?: number;
   altitude?: number;
-  path_hash_mode?: number;
+  path_hash_mode?: number | null;
   location_source?: 'manual' | 'gps' | 'home_assistant';
   connection_type?: string;
   connection_address?: string;

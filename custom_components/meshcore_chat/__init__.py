@@ -48,6 +48,7 @@ from .utils import (
     enrich_rx_log_entries,
     hoist_flood_scope,
     wildcard_global_allowlisted,
+    message_sender,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -366,7 +367,7 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
             # alongside the fetched copy → duplicate bubbles until the
             # message-store is rebuilt (e.g. on conversation switch).
             ts = data.get("timestamp", "")
-            sender = data.get("sender_name", "")
+            sender = message_sender(data)
             text = data.get("message") or data.get("text") or ""
             raw = f"{ts}|{sender}|{text}"
             msg_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
@@ -376,7 +377,7 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
         # the dict.
         record: dict[str, Any] = {
             "id": msg_id,
-            "sender": data.get("sender_name") or data.get("sender") or "",
+            "sender": message_sender(data),
             "text": data.get("message") or data.get("text") or "",
             "timestamp": data.get("timestamp", ""),
             "message_type": data.get("message_type", ""),
@@ -395,6 +396,9 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
             "ack_received",
             "send_id",
             "delivery_status",
+            "entry_id",
+            "repeats_observable",
+            "collecting",
         ):
             if k in data:
                 record[k] = data[k]
@@ -408,7 +412,7 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
             # already carries rx_log_data at fire time shows its inbound
             # region scope immediately (the late RX_LOG correlation patch
             # re-hoists via MessageStore.update_message_rx_data).
-            hoist_flood_scope(record, wildcard_global_allowlisted(hass))
+            hoist_flood_scope(record, wildcard_global_allowlisted(hass, data.get("entry_id")))
 
         # Route-popup synth for DMs. Channel messages get per-repeater rx_log_data
         # arrays via the upstream RX_LOG correlation pass; DMs don't — they
@@ -429,12 +433,7 @@ def _make_message_handler(hass: HomeAssistant, entry_id: str):
                 synth["rssi"] = record["rssi"]
             record["rx_log_data"] = [synth]
 
-        # Default delivery_status. The upstream EVENT_MESHCORE_MESSAGE for
-        # outgoing fires AFTER its 4-second progressive RX_LOG collection
-        # window (handle_outgoing_message in upstream logbook.py) — so by
-        # the time we see it, the message has been transmitted and is
-        # definitively "sent". For DMs, ack_received is authoritative when
-        # present. Channel messages never have ack_received.
+        # Transmission and repeat observation are separate states.
         if record["outgoing"]:
             ack = data.get("ack_received")
             record.setdefault(
@@ -505,12 +504,15 @@ def _make_delivery_update_handler(hass: HomeAssistant, entry_id: str):
         elif progressive:
             status = None  # don't touch
         else:
-            status = "sent" if data.get("ack_received") else "pending"
+            status = "delivered" if data.get("ack_received") is True else ("sent" if data.get("message_type") in ("channel", "direct", "dm") else None)
 
         kwargs: dict[str, Any] = {}
-        for k in ("rx_log_data", "repeater_count", "ack_received"):
+        for k in ("rx_log_data", "repeater_count", "ack_received", "repeats_observable", "collecting"):
             if k in data:
                 kwargs[k] = data[k]
+
+        if "progressive" in data:
+            kwargs["collecting"] = progressive
 
         # Enrich rx_log entries (path_nodes/hop_count derived from path/path_len)
         # before any persistence so updates and the rx_log mirror stay aligned
@@ -520,31 +522,9 @@ def _make_delivery_update_handler(hass: HomeAssistant, entry_id: str):
 
         entity_id = data.get("entity_id")
         if entity_id:
-            if status is not None:
-                await store.update_message_delivery(
-                    entity_id, msg_id, status, **kwargs
-                )
-            elif kwargs:
-                # Status untouched, but still propagate rx_log/repeater_count
-                # as a metadata-only update via the rx_data path below.
-                pass
-            # Some delivery updates carry the final rx_log_data — keep both
-            # the rx_log mirror and the delivery row in sync.
-            if "rx_log_data" in kwargs:
-                await store.update_message_rx_data(
-                    entity_id, msg_id, kwargs["rx_log_data"]
-                )
+            await store.update_message_delivery(entity_id, msg_id, status, **kwargs)
         else:
-            # Pre-PR-B: scan all conversations.
-            located = None
-            if status is not None:
-                located = await store.update_message_delivery_any(
-                    msg_id, status, **kwargs
-                )
-            if located and "rx_log_data" in kwargs:
-                await store.update_message_rx_data(
-                    located, msg_id, kwargs["rx_log_data"]
-                )
+            await store.update_message_delivery_any(msg_id, status, **kwargs)
 
     return _handle
 

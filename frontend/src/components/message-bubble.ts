@@ -354,6 +354,8 @@ export class MessageBubble extends LitElement {
   private _getStatusLabel(deliveryStatus: DeliveryStatus): string {
     const status = deliveryStatus.status;
     const repeats = deliveryStatus.repeaterCount ?? 0;
+    if (status !== 'failed' && deliveryStatus.repeatsObservable === false) return 'Unconfirmed';
+    if (status !== 'failed' && deliveryStatus.collecting && repeats === 0) return 'Waiting...';
 
     switch (status) {
       case 'pending':

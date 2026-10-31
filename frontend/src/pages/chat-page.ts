@@ -52,6 +52,20 @@ export class ChatPage extends LitElement {
   private _unsubUnread: (() => void) | null = null;
   @state() private _inputText = '';
   @state() private _sending = false;
+  private _failedDrafts = new Map<string, string[]>();
+
+  private _draftContext(): string {
+    return JSON.stringify([this.config?.entry_id, this.selectedId]);
+  }
+
+  private _restoreFailedDraft() {
+    if (this._inputText) return;
+    const key = this._draftContext();
+    const queue = this._failedDrafts.get(key);
+    if (!queue?.length) return;
+    this._inputText = queue.shift()!;
+    if (!queue.length) this._failedDrafts.delete(key);
+  }
   @state() private _viewportNarrow = false;
   private _mediaQuery: MediaQueryList | null = null;
   private _mediaHandler: ((e: MediaQueryListEvent) => void) | null = null;
@@ -1001,6 +1015,7 @@ export class ChatPage extends LitElement {
   }
 
   private _onConversationSelected() {
+    this._restoreFailedDraft();
     if (this.selectedId && this._messageStore && this.config && this.hass) {
       const conversation = this.conversations.find((c) => {
         if ('pubkey_prefix' in c) {
@@ -1093,13 +1108,18 @@ export class ChatPage extends LitElement {
     }
 
     this._sending = true;
+    const context = this._draftContext();
+    const selectedId = this.selectedId;
+    const entryId = this.config.entry_id;
+    const store = this._messageStore;
     const text = this._inputText.trim();
     this._inputText = '';
+    let optimisticId: string | undefined;
 
     try {
       // Add optimistic message
       if (this._messageStore) {
-        this._messageStore.addOptimisticMessage(this.config.node_name, text);
+        optimisticId = this._messageStore.addOptimisticMessage(this.config.node_name, text);
         // Always scroll to bottom after sending
         this._pendingScroll = 'bottom';
       }
@@ -1109,15 +1129,12 @@ export class ChatPage extends LitElement {
       // through so upstream `meshcore.send_*` routes to the right
       // coordinator. Without entry_id, the upstream service sends from
       // whichever coordinator is iterated first in `hass.data[meshcore]`.
-      const entryId = this.config?.entry_id;
       if (this._isContact()) {
-        await sendDirectMessage(this.hass, this.selectedId, text, entryId);
+        await sendDirectMessage(this.hass, selectedId, text, entryId);
       } else {
-        const idx = parseInt(this.selectedId, 10);
+        const idx = parseInt(selectedId, 10);
         if (isNaN(idx) || idx < 0 || idx > 255) {
-          console.error('Invalid channel index:', this.selectedId);
-          this._inputText = text;
-          return;
+          throw new Error('Invalid channel index');
         }
         // Thread the channel's persisted region scope into the send so
         // the upstream service applies (and then resets) the flood
@@ -1127,11 +1144,17 @@ export class ChatPage extends LitElement {
           this._getActiveChannelScope() ?? undefined,
         );
       }
+      if (optimisticId) store?.confirmOptimisticMessage(optimisticId);
     } catch (err) {
       console.error('Failed to send message:', err);
-      this._inputText = text; // Restore text on error
+      if (optimisticId) store?.markOptimisticFailed(optimisticId);
+      const queue = this._failedDrafts.get(context) ?? [];
+      queue.push(text);
+      this._failedDrafts.set(context, queue);
+      if (context === this._draftContext()) this._restoreFailedDraft();
     } finally {
       this._sending = false;
+      if (context === this._draftContext()) this._restoreFailedDraft();
     }
   }
 

@@ -174,6 +174,7 @@ class MessageStore:
 
         # Per-conversation data — loaded on demand, evicted when idle.
         self._loaded_conversations: dict[str, list[dict]] = {}
+        self._load_lock = asyncio.Lock()
         self._conversation_stores: dict[str, Store] = {}
         self._conversation_dirty: set[str] = set()
         self._conversation_last_access: dict[str, float] = {}
@@ -239,23 +240,28 @@ class MessageStore:
             self._conversation_last_access[entity_id] = time.time()
             return self._loaded_conversations[entity_id]
 
-        stored = await self._store_for(entity_id).async_load()
-        messages: list[dict] = _coerce_message_list(stored, entity_id)
-        # One-time backfill on first load — enriches old records that pre-date
-        # the rx_log/delivery-status fixes. Persists on next save.
-        if messages and _backfill_messages(
-            messages, wildcard_global_allowlisted(self.hass)
-        ):
-            _LOGGER.debug(
-                "Backfilled rx_log/delivery_status on stored records for %s",
-                entity_id,
-            )
-            self._conversation_dirty.add(entity_id)
-            self._schedule_conversation_save(entity_id)
-        self._loaded_conversations[entity_id] = messages
-        self._conversation_last_access[entity_id] = time.time()
-        self._schedule_eviction()
-        return messages
+        # Event listeners can hydrate the same conversation concurrently.
+        async with self._load_lock:
+            if entity_id in self._loaded_conversations:
+                self._conversation_last_access[entity_id] = time.time()
+                return self._loaded_conversations[entity_id]
+            stored = await self._store_for(entity_id).async_load()
+            messages: list[dict] = _coerce_message_list(stored, entity_id)
+            # One-time backfill on first load — enriches old records that pre-date
+            # the rx_log/delivery-status fixes. Persists on next save.
+            if messages and _backfill_messages(
+                messages, wildcard_global_allowlisted(self.hass)
+            ):
+                _LOGGER.debug(
+                    "Backfilled rx_log/delivery_status on stored records for %s",
+                    entity_id,
+                )
+                self._conversation_dirty.add(entity_id)
+                self._schedule_conversation_save(entity_id)
+            self._loaded_conversations[entity_id] = messages
+            self._conversation_last_access[entity_id] = time.time()
+            self._schedule_eviction()
+            return messages
 
     async def _load_for_search(self, entity_id: str) -> list[dict]:
         """Load a conversation for read-only search without caching.
@@ -343,26 +349,32 @@ class MessageStore:
                 # usually correlated *after* the message first stored, so
                 # re-hoist the top-level field on this late patch — the
                 # same place repeater_count is kept correct.
-                hoist_flood_scope(m, wildcard_global_allowlisted(self.hass))
+                hoist_flood_scope(m, wildcard_global_allowlisted(self.hass, m.get("entry_id")))
                 self._conversation_dirty.add(entity_id)
                 self._schedule_conversation_save(entity_id)
                 return
 
     async def update_message_delivery(
-        self, entity_id: str, message_id: str, status: str, **kwargs: Any
+        self, entity_id: str, message_id: str, status: str | None, **kwargs: Any
     ) -> None:
         """Update delivery status (and optional extra fields) on a stored message."""
         messages = await self._ensure_loaded(entity_id)
         for m in reversed(messages):
             if m.get("id") == message_id:
-                m["delivery_status"] = status
+                if m.get("collecting") is False and kwargs.get("collecting") is True:
+                    return
+                if status is not None and (m.get("delivery_status") != "failed" or status == "failed"):
+                    m["delivery_status"] = status
                 m.update(kwargs)
+                if "rx_log_data" in kwargs:
+                    m["repeater_count"] = len(kwargs["rx_log_data"] or [])
+                    hoist_flood_scope(m, wildcard_global_allowlisted(self.hass, m.get("entry_id")))
                 self._conversation_dirty.add(entity_id)
                 self._schedule_conversation_save(entity_id)
                 return
 
     async def update_message_delivery_any(
-        self, message_id: str, status: str, **kwargs: Any
+        self, message_id: str, status: str | None, **kwargs: Any
     ) -> str | None:
         """Update delivery status on a message whose entity_id we don't know.
 

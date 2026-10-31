@@ -138,11 +138,14 @@ interface PrivateChatPage {
     loadingNewer: boolean;
     newMessagesWhileAway: number;
     messages: ChatMessage[];
+    addOptimisticMessage(sender: string, text: string): string;
     _hasNewerMessages?: boolean;
     _newMessagesWhileAway?: number;
   } | null;
   _currentEntityId: string | null;
   _conversationResolved: boolean;
+  _inputText: string;
+  _sendMessage(): Promise<void>;
   _pendingScroll: 'bottom' | 'last-read' | null;
   _scrollInFlight: boolean;
   _onConversationSelected(): void;
@@ -864,6 +867,72 @@ describe('Phase 4 — indicator visibility', () => {
 // fix is covered there too (the leading-outgoing-skip case).
 
 // ─── Region scope — send threading + header chip ─────────────────────────
+
+describe('explicit send rejection recovery', () => {
+  it('marks only the rejected call failed and restores its text', async () => {
+    const page = await mountChatPage({ selectedId: '0', conversations: [makeChannel(0)] });
+    const p = priv(page);
+    const first = p._messageStore!.addOptimisticMessage('TestNode', 'same text');
+    vi.mocked(api.sendChannelMessage).mockRejectedValueOnce(new Error('rejected'));
+    p._inputText = 'same text';
+    p._conversationResolved = true;
+    await p._sendMessage();
+    const messages = p._messageStore!.messages;
+    expect(messages).toHaveLength(2);
+    expect(messages.find(m => m.id === first)?.deliveryStatus?.status).not.toBe('failed');
+    expect(messages.filter(m => m.deliveryStatus?.status === 'failed')).toHaveLength(1);
+    expect(p._inputText).toBe('same text');
+  });
+
+  it('preserves later edits and queues different rejected drafts', async () => {
+    const page = await mountChatPage({ selectedId: '0', conversations: [makeChannel(0)] });
+    const p = priv(page);
+    let reject!: (error: Error) => void;
+    vi.mocked(api.sendChannelMessage).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    p._inputText = 'first rejected draft';p._conversationResolved = true;
+    const pending = p._sendMessage();
+    p._inputText = 'newer edit';
+    reject(new Error('rejected'));
+    await pending;
+    expect(p._inputText).toBe('newer edit');
+    vi.mocked(api.sendChannelMessage).mockRejectedValueOnce(new Error('rejected again'));
+    p._inputText = 'second rejected draft';
+    await p._sendMessage();
+    expect(p._inputText).toBe('first rejected draft');
+    p._inputText = '';
+    p._onConversationSelected();
+    expect(p._inputText).toBe('second rejected draft');
+  });
+
+  it('does not restore an old radio draft into the new radio', async () => {
+    const page = await mountChatPage({ selectedId: '0', conversations: [makeChannel(0)] });
+    const p = priv(page);
+    let reject!: (error: Error) => void;
+    vi.mocked(api.sendChannelMessage).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    p._inputText = 'radio A draft';p._conversationResolved = true;
+    const pending = p._sendMessage();
+    page.config = makeConfig({ entry_id: 'radio-b' });
+    await page.updateComplete;
+    p._inputText = 'radio B edit';
+    reject(new Error('rejected'));
+    await pending;
+    expect(p._inputText).toBe('radio B edit');
+    page.config = makeConfig();
+    await page.updateComplete;
+    p._inputText = '';page.selectedId = '0';
+    await page.updateComplete;
+    expect(p._inputText).toBe('radio A draft');
+  });
+
+  it('does not infer failure from a normal service return', async () => {
+    const page = await mountChatPage({ selectedId: '0', conversations: [makeChannel(0)] });
+    const p = priv(page);p._inputText = 'offline may return normally';p._conversationResolved = true;
+    vi.mocked(api.sendChannelMessage).mockResolvedValueOnce(undefined);
+    await p._sendMessage();
+    expect(p._messageStore!.messages.some(m => m.deliveryStatus?.status === 'failed')).toBe(false);
+    expect(p._inputText).toBe('');
+  });
+});
 //
 // A channel's persisted region scope (Channel.scope, served by
 // ws_get_channels) must ride along on every send as
