@@ -21,11 +21,11 @@
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^12.3.0",
-    "happy-dom": "^20.10.6",
+    "happy-dom": "^21.0.4",
     "rollup": "^4.62.2",
     "tslib": "^2.6.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.12"
   },
   "browserslist": [
     "chrome >= 64",
@@ -35,5 +35,12 @@
     "and_chr >= 64",
     "ios_saf >= 12",
     "samsung >= 9"
-  ]
+  ],
+  "overrides": {
+    "vite": "8.1.6",
+    "browserslist": "4.28.7",
+    "baseline-browser-mapping": "2.11.0",
+    "postcss": "8.5.23",
+    "source-map-js": "1.2.2"
+  }
 }
