@@ -21,6 +21,8 @@ coverage.xml
 # Node / frontend build cache
 node_modules/
 .rollup.cache/
+# JavaScript the TypeScript compiler writes for rollup to bundle
+frontend/.build/
 
 # Ignore generic dist/ (Python builds, etc.) but DO track the panel
 # bundle — HACS users install the prebuilt artifact and never run npm.

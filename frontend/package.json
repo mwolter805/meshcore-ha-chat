@@ -4,8 +4,9 @@
   "private": true,
   "description": "MeshCore sidebar panel for Home Assistant",
   "scripts": {
-    "build": "rollup -c",
-    "dev": "rollup -c --watch",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "build": "npm run build:ts && rollup -c",
+    "dev": "npm run build:ts && rollup -c --watch",
     "lint": "eslint src/ --ext .ts",
     "lint:fix": "eslint src/ --ext .ts --fix",
     "test": "vitest run",
@@ -20,11 +21,10 @@
     "@rollup/plugin-babel": "^7.1.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-terser": "^1.0.0",
-    "@rollup/plugin-typescript": "^12.3.0",
     "happy-dom": "^21.0.4",
     "rollup": "^4.63.1",
     "tslib": "^2.6.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.12"
   },
   "browserslist": [

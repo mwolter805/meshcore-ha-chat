@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../src/pages/settings-page';
 import type { DeviceConfig } from '../src/types';
 import { getDeviceConfig, setDeviceConfig } from '../src/api';
+import type { SetDeviceConfigResponse } from '../src/api';
 
 vi.mock('../src/api', async (original) => ({
   ...await original<typeof import('../src/api')>(),
@@ -105,7 +106,7 @@ describe('Path Hash Mode', () => {
     await page.updateComplete;
     await Promise.resolve();
     page._editValues = { tx_power: 17 };
-    vi.mocked(setDeviceConfig).mockResolvedValue({ success: true });
+    vi.mocked(setDeviceConfig).mockResolvedValue({ success: true, changed: [] });
     await page._handleApply('radio-settings');
     expect(setDeviceConfig).toHaveBeenLastCalledWith(page.hass, { tx_power: 17 }, 'b');
     page._editValues = { path_hash_mode: 2 };
@@ -124,10 +125,10 @@ describe('Path Hash Mode', () => {
     page.config = { entry_id: 'b' };
     await page.updateComplete;
     expect([...pending.keys()]).toEqual(['a', 'b']);
-    pending.get('b')!({ name: 'B', path_hash_mode: 1 });
+    pending.get('b')!({ name: 'B', path_hash_mode: 1 } as DeviceConfig);
     await Promise.resolve();
     await page.updateComplete;
-    pending.get('a')!({ name: 'A', path_hash_mode: 0 });
+    pending.get('a')!({ name: 'A', path_hash_mode: 0 } as DeviceConfig);
     await Promise.resolve();
     await page.updateComplete;
     expect(page._deviceConfig?.name).toBe('B');
@@ -137,20 +138,20 @@ describe('Path Hash Mode', () => {
   it('does not apply a late save result to another radio', async () => {
     await mount(0);
     page.hass = { callWS: vi.fn().mockResolvedValue([]) };
-    vi.mocked(getDeviceConfig).mockResolvedValue({ name: 'A', path_hash_mode: 0 });
+    vi.mocked(getDeviceConfig).mockResolvedValue({ name: 'A', path_hash_mode: 0 } as DeviceConfig);
     page.config = { entry_id: 'a' };
     await page.updateComplete;
     await Promise.resolve();
-    let finish!: (result: { success: boolean }) => void;
+    let finish!: (result: SetDeviceConfigResponse) => void;
     vi.mocked(setDeviceConfig).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     page._editValues = { path_hash_mode: 2 };
     const saving = page._handleApply('radio-settings');
     expect(setDeviceConfig).toHaveBeenCalledWith(page.hass, { path_hash_mode: 2 }, 'a');
-    vi.mocked(getDeviceConfig).mockResolvedValue({ name: 'B', path_hash_mode: 1 });
+    vi.mocked(getDeviceConfig).mockResolvedValue({ name: 'B', path_hash_mode: 1 } as DeviceConfig);
     page.config = { entry_id: 'b' };
     await page.updateComplete;
     await Promise.resolve();
-    finish({ success: true });
+    finish({ success: true, changed: [] });
     await saving;
     expect(page._deviceConfig?.path_hash_mode).toBe(1);
     expect(page._editValues).toEqual({});

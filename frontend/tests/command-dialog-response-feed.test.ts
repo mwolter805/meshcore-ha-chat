@@ -97,7 +97,7 @@ describe('command-dialog device response feed', () => {
     await el.updateComplete;
     await flush();
     expect(el._deviceResponses).toHaveLength(0);
-    oldCallback({ data: { entry_id: 'radio-a', pubkey_prefix: 'rpt1deadbeef', message: 'late' } } as HassEvent);
+    oldCallback({ data: { entry_id: 'radio-a', pubkey_prefix: 'rpt1deadbeef', message: 'late' } } as unknown as HassEvent);
     expect(el._deviceResponses).toHaveLength(0);
     fireEvent({ entry_id: 'radio-b', pubkey_prefix: 'rpt1deadbeef', message: 'new radio' });
     expect(el._deviceResponses).toHaveLength(1);
