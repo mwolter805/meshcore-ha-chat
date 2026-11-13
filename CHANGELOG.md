@@ -4,7 +4,7 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
-## [0.4.0] - Unreleased
+## [0.3.2] - Unreleased
 
 ### Compatibility
 
