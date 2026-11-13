@@ -1,14 +1,19 @@
 import fs from 'fs';
 import resolve from '@rollup/plugin-node-resolve';
-import typescript from '@rollup/plugin-typescript';
 import terser from '@rollup/plugin-terser';
 import { getBabelOutputPlugin } from '@rollup/plugin-babel';
 
 const dev = process.env.ROLLUP_WATCH === 'true';
 const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf-8'));
 
+// The build has two steps (see `npm run build`). The TypeScript compiler
+// first writes plain JavaScript for src/ into .build/ (tsconfig.build.json);
+// rollup then bundles that JavaScript. TypeScript 7 no longer ships the
+// JavaScript compiler API that an in-rollup TypeScript plugin needs, so the
+// conversion cannot happen inside rollup. In watch mode rollup only watches
+// .build/: run `npm run build:ts -- --watch` alongside to pick up src/ edits.
 export default {
-  input: 'src/meshcore-chat-panel.ts',
+  input: '.build/meshcore-chat-panel.js',
   output: {
     // Bundle ships flat at the integration root — see panel.py for the
     // matching StaticPathConfig that serves this file.
@@ -61,19 +66,5 @@ export default {
           ]),
     ],
   },
-  plugins: [
-    resolve(),
-    typescript({
-      tsconfig: './tsconfig.json',
-      declaration: false,
-      sourceMap: dev,
-      include: ['src/**/*.ts'],
-      // @rollup/plugin-typescript v12 requires the TS `outDir` to resolve
-      // inside the rollup output file's directory. The bundle is emitted to
-      // ../custom_components/meshcore_chat/, so point outDir there (overrides
-      // tsconfig's ./dist). rollup writes the actual bundle; nothing is
-      // emitted loose because declaration is off.
-      outDir: '../custom_components/meshcore_chat',
-    }),
-  ],
+  plugins: [resolve()],
 };

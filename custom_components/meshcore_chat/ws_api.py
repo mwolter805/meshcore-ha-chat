@@ -11,30 +11,32 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
 from . import MeshCoreChatRuntimeData, _sync_upstream_repair_issue
 from .const import (
-    CONF_FLOOD_SCOPES_UPSTREAM,
     CONF_NAME_UPSTREAM,
     DOMAIN,
     ENTITY_DOMAIN_BINARY_SENSOR,
     MESHCORE_DOMAIN,
 )
 from .message_store import MessageStore
-from .utils import format_entity_id, parse_flood_scope_allowlist, sanitize_name
+from .utils import entry_flood_scopes, format_entity_id, sanitize_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -707,6 +709,9 @@ async def ws_clear_discovered_contacts(
                 entity_registry.async_remove(entity_id)
 
         coordinator._discovered_contacts.clear()
+        invalidate = getattr(coordinator, "invalidate_contacts", None)
+        if callable(invalidate):
+            invalidate()
 
         try:
             await coordinator._store.async_save(coordinator._discovered_contacts)
@@ -791,8 +796,8 @@ def ws_get_flood_scopes(hass, connection, msg):
     """Return the upstream integration's configured region-scope names.
 
     Reads the comma-separated allowlist the user maintains in the
-    meshcore integration's Global Settings (config-entry data key
-    ``flood_scopes``, added by meshcore-dev/meshcore-ha#250). Returns
+    meshcore integration's Global Settings (``flood_scopes`` in current
+    options, with a data fallback for older entries). Returns
     ``{"scopes": [...named regions...], "global": <bool>}``. The
     ``global`` flag is true when the allowlist contains the ``*``
     wildcard, which the firmware treats as "all regions / global flood";
@@ -814,9 +819,7 @@ def ws_get_flood_scopes(hass, connection, msg):
     # and blanks are dropped, '*' becomes the distinct "all regions /
     # global flood" flag (kept out of the named-region list) so the dialog
     # renders one canonical global option.
-    scopes, has_global = parse_flood_scope_allowlist(
-        coordinator.config_entry.data.get(CONF_FLOOD_SCOPES_UPSTREAM, "")
-    )
+    scopes, has_global = entry_flood_scopes(coordinator.config_entry)
     connection.send_result(msg["id"], {"scopes": scopes, "global": has_global})
 
 
@@ -864,15 +867,19 @@ def ws_get_managed_devices(hass, connection, msg):
     for repeater_config in coordinator._tracked_repeaters:
         pubkey_prefix = repeater_config.get("pubkey_prefix", "")
         repeater_name = repeater_config.get("name", "")
-        stats = coordinator._repeater_stats.get(pubkey_prefix, {})
+        stats = {} if _modern_parent(coordinator.api) else coordinator._repeater_stats.get(pubkey_prefix, {})
         update_interval = repeater_config.get("update_interval", 0)
 
         # Look up firmware version from HA device registry
         fw_version = stats.get("firmware_version")
         if not fw_version:
-            device = dev_reg.async_get_device(
-                identifiers={(MESHCORE_DOMAIN, f"{entry_id}_repeater_{pubkey_prefix}")}
-            )
+            identifier = (MESHCORE_DOMAIN, f"{entry_id}_repeater_{pubkey_prefix}")
+            lookup = getattr(dev_reg, "async_get_device_by_identifier", None)
+            if callable(lookup):
+                device = lookup(identifier, entry_id)
+            else:
+                matches = [d for d in dr.async_entries_for_config_entry(dev_reg, entry_id) if identifier in d.identifiers]
+                device = matches[0] if len(matches) == 1 else None
             if device:
                 fw_version = device.sw_version
 
@@ -936,8 +943,8 @@ def ws_get_managed_devices(hass, connection, msg):
         vol.Optional("entry_id"): str,
     }
 )
-@callback
-def ws_get_device_config(hass, connection, msg):
+@websocket_api.async_response
+async def ws_get_device_config(hass, connection, msg):
     """Return companion device config."""
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
     if not coordinator:
@@ -966,8 +973,21 @@ def ws_get_device_config(hass, connection, msg):
     config["longitude"] = self_info.get("adv_lon")
     config["altitude"] = None  # Not available in SDK - set_coords() hardcodes altitude to 0
 
-    # Advanced settings
-    config["path_hash_mode"] = self_info.get("path_hash_mode")
+    # Copy only the validated mode, never the DEVICE_INFO payload.
+    config["path_hash_mode"] = None
+    try:
+        if connection.user.is_admin:
+            result = await _parent_command(
+                hass, connection, msg, coordinator, "send_device_query", _service_only=True
+            )
+            payload = result.payload
+            mode = payload.get("path_hash_mode")
+            if type(mode) is int and mode in (0, 1, 2):
+                config["path_hash_mode"] = mode
+    except Exception:
+        # Unsupported services, unavailable radios and permission failures must
+        # not prevent reading cached settings. Never log the response.
+        pass
 
     # Location source
     config["location_source"] = getattr(coordinator, "location_source", "manual")
@@ -1145,16 +1165,9 @@ async def ws_set_device_config(hass, connection, msg):
                 coordinator.config_entry.entry_id
             )
 
-            # Direct SDK call + EventType.ERROR check (mirrors the
-            # identity-change path's `_do_identity_change`). Avoids the
-            # silent-success-on-firmware-error path that would otherwise
-            # let a rejected rename look like a successful one to the user.
-            #
-            # The `EventType` import is lazy so SDK-level failures
-            # (ConnectionError, TimeoutError, etc.) raised by `set_name`
-            # propagate through the outer `except` without first
-            # tripping a missing-meshcore-package import in test envs.
-            result = await coordinator.api.mesh_core.commands.set_name(new_name)
+            # Parent services coordinate modern radios; older SDK results
+            # still need the firmware error check below.
+            result = await _parent_command(hass, connection, msg, coordinator, 'set_name', new_name)
             # Short-circuit None first so we don't need the meshcore.events
             # import on the never-responded path (defensive: lets tests
             # exercise the no-Event case without the patched_event_type
@@ -1286,9 +1299,7 @@ async def ws_set_device_config(hass, connection, msg):
 
         # Handle tx_power setting
         if "tx_power" in settings:
-            result = await coordinator.api.mesh_core.commands.set_tx_power(
-                settings["tx_power"]
-            )
+            result = await _parent_command(hass, connection, msg, coordinator, 'set_tx_power', settings['tx_power'])
             reason = _device_config_failure_reason(result)
             if reason is not None:
                 _send_device_config_failure(
@@ -1299,9 +1310,7 @@ async def ws_set_device_config(hass, connection, msg):
 
         # Handle coordinates setting
         if "latitude" in settings and "longitude" in settings:
-            result = await coordinator.api.mesh_core.commands.set_coords(
-                settings["latitude"], settings["longitude"]
-            )
+            result = await _parent_command(hass, connection, msg, coordinator, 'set_coords', settings['latitude'], settings['longitude'])
             reason = _device_config_failure_reason(result)
             if reason is not None:
                 _send_device_config_failure(
@@ -1321,9 +1330,7 @@ async def ws_set_device_config(hass, connection, msg):
             cr = settings.get("coding_rate", self_info.get("radio_cr"))
 
             if all(v is not None for v in [freq, bw, sf, cr]):
-                result = await coordinator.api.mesh_core.commands.set_radio(
-                    freq, bw, sf, cr
-                )
+                result = await _parent_command(hass, connection, msg, coordinator, 'set_radio', freq, bw, sf, cr)
                 reason = _device_config_failure_reason(result)
                 if reason is not None:
                     _send_device_config_failure(
@@ -1336,9 +1343,7 @@ async def ws_set_device_config(hass, connection, msg):
 
         # Handle path_hash_mode
         if "path_hash_mode" in settings:
-            result = await coordinator.api.mesh_core.commands.set_path_hash_mode(
-                settings["path_hash_mode"]
-            )
+            result = await _parent_command(hass, connection, msg, coordinator, 'set_path_hash_mode', settings['path_hash_mode'])
             reason = _device_config_failure_reason(result)
             if reason is not None:
                 _send_device_config_failure(
@@ -1347,10 +1352,10 @@ async def ws_set_device_config(hass, connection, msg):
                 return
             changed.append("path_hash_mode")
 
-        # Refresh self_info cache so subsequent reads return updated values
-        if changed:
+        # Modern parent setters refresh their own cache; older parents need this.
+        if changed and not _modern_parent(coordinator.api):
             try:
-                appstart_result = await coordinator.api.mesh_core.commands.send_appstart()
+                appstart_result = await _parent_command(hass, connection, msg, coordinator, 'send_appstart')
                 coordinator.api._cache_self_info_event(appstart_result)
             except Exception:
                 _LOGGER.warning("Failed to refresh self_info after set_device_config")
@@ -1400,6 +1405,56 @@ def _format_event_response(result) -> str:
     return str(payload)
 
 
+def _modern_parent(api) -> bool:
+    """Detect the supported radio interface without invoking deprecated shims."""
+    return inspect.getattr_static(api, "exchange", None) is not None
+
+
+def _command_failure(result) -> str | None:
+    if result is None:
+        return "No response from device"
+    payload = getattr(result, "payload", result)
+    event_type = getattr(result, "type", None)
+    if getattr(event_type, "name", event_type) == "ERROR":
+        return "Device rejected command"
+    if isinstance(payload, dict):
+        for key in ("error", "error_code", "reason"):
+            if key in payload:
+                return str(payload[key])
+    return None
+
+
+async def _parent_command(hass, connection, msg, coordinator, command, *args, _service_only=False, **kwargs):
+    """Use the parent's authorization and radio coordination on modern parents."""
+    if not command.isidentifier() or command.startswith("_"):
+        raise HomeAssistantError("Invalid command name")
+    if _service_only or _modern_parent(coordinator.api):
+        if not hass.services.has_service(MESHCORE_DOMAIN, "execute_command"):
+            raise HomeAssistantError("Parent command service is unavailable")
+        if any(not key.isidentifier() for key in kwargs):
+            raise HomeAssistantError("Invalid command argument")
+        def argument(value):
+            if isinstance(value, dict) and value.get("public_key"):
+                return repr(value["public_key"])
+            return repr(value)
+        values = [argument(v) for v in args] + [f"{k}={argument(v)}" for k, v in kwargs.items()]
+        response = await hass.services.async_call(
+            MESHCORE_DOMAIN, "execute_command",
+            {"command": f"{command}({', '.join(values)})", "entry_id": coordinator.config_entry.entry_id},
+            blocking=True, return_response=True, context=connection.context(msg),
+        )
+        failure = _command_failure(response)
+        if failure:
+            raise HomeAssistantError(f"Command failed: {failure}")
+        if not isinstance(response, dict):
+            raise HomeAssistantError("Unexpected parent command response")
+        return SimpleNamespace(type="OK", payload=response)
+    method = getattr(coordinator.api.mesh_core.commands, command, None)
+    if method is None:
+        raise HomeAssistantError("Unsupported command")
+    return await method(*args, **kwargs)
+
+
 # ─── meshcore/execute_local ─────────────────────────────────────────────
 # Execute a Python library command on the companion
 
@@ -1422,7 +1477,7 @@ async def ws_execute_local(hass, connection, msg):
         return
 
     command = msg.get("command")
-    args = msg.get("args", {})
+    args = dict(msg.get("args", {}))
 
     # Defense-in-depth against dunder-method invocation via getattr. The
     # frontend's commands/local-commands.ts catalogue is an *implicit*
@@ -1437,16 +1492,18 @@ async def ws_execute_local(hass, connection, msg):
         return
 
     try:
-        # Get the command method from mesh_core.commands
-        command_method = getattr(coordinator.api.mesh_core.commands, command, None)
-        if not command_method:
-            connection.send_error(
-                msg["id"], "not_found", f"Command not found: {command}"
-            )
+        binary_arguments = {"sign": "data", "sign_data": "chunk", "import_contact": "card_data", "send_control_data": "payload", "send_trace": "path"}
+        binary_key = binary_arguments.get(command)
+        if binary_key and isinstance(args.get(binary_key), str):
+            args[binary_key] = bytes.fromhex(args[binary_key])
+        if not _modern_parent(coordinator.api) and getattr(coordinator.api.mesh_core.commands, command, None) is None:
+            connection.send_error(msg["id"], "not_found", f"Command not found: {command}")
             return
-
-        # Execute the command with provided args
-        response = await command_method(**args)
+        response = await _parent_command(hass, connection, msg, coordinator, command, **args)
+        failure = _command_failure(response)
+        if failure:
+            connection.send_result(msg["id"], {"response": failure, "success": False, "timestamp": datetime.now().isoformat()})
+            return
         timestamp = datetime.now().isoformat()
 
         # Extract meaningful text from Event objects
@@ -1512,7 +1569,7 @@ async def ws_execute_remote(hass, connection, msg):
             return
 
         # Get the contact for this device
-        contact = coordinator.api.mesh_core.get_contact_by_key_prefix(target_prefix)
+        contact = coordinator.api.contact_by_prefix(target_prefix) if _modern_parent(coordinator.api) else coordinator.api.mesh_core.get_contact_by_key_prefix(target_prefix)
         if not contact:
             connection.send_error(
                 msg["id"],
@@ -1531,15 +1588,14 @@ async def ws_execute_remote(hass, connection, msg):
         # the response so the user knows the login wasn't confirmed.
         login_unconfirmed = False
         if password:
-            login_result = await coordinator.api.mesh_core.commands.send_login_sync(
-                contact, password
-            )
+            login_result = await _parent_command(hass, connection, msg, coordinator, 'send_login_sync', contact, password)
             login_unconfirmed = login_result is None
 
         # Send the command
-        cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
-            contact, command
-        )
+        cmd_result = await _parent_command(hass, connection, msg, coordinator, 'send_cmd', contact, command)
+        failure = _command_failure(cmd_result)
+        if failure:
+            raise HomeAssistantError(failure)
 
         timestamp = datetime.now().isoformat()
 
@@ -1602,9 +1658,7 @@ async def ws_set_channel(hass, connection, msg):
             channel_secret = None
 
         # Call set_channel command
-        result = await coordinator.api.mesh_core.commands.set_channel(
-            channel_idx, name, channel_secret
-        )
+        result = await _parent_command(hass, connection, msg, coordinator, 'set_channel', channel_idx, name, channel_secret)
 
         # Persist the per-channel region scope alongside the device-side
         # save. The radio's channel slot has no scope field — scope is a
@@ -1668,9 +1722,7 @@ async def ws_remove_channel(hass, connection, msg):
         # Clear the channel by setting empty name; pass None for key so the
         # SDK auto-derives it (passing "" causes ValueError — SDK expects
         # None or 16 raw bytes, not an empty string).
-        result = await coordinator.api.mesh_core.commands.set_channel(
-            channel_idx, "", None
-        )
+        result = await _parent_command(hass, connection, msg, coordinator, 'set_channel', channel_idx, '', None)
 
         # Drop the persisted region scope with the channel — a future
         # channel created in this slot starts unscoped.
@@ -1802,7 +1854,7 @@ async def ws_remove_neighbor(hass, connection, msg):
             return
 
         # Get the contact for this repeater
-        contact = coordinator.api.mesh_core.get_contact_by_key_prefix(target_prefix)
+        contact = coordinator.api.contact_by_prefix(target_prefix) if _modern_parent(coordinator.api) else coordinator.api.mesh_core.get_contact_by_key_prefix(target_prefix)
         if not contact:
             connection.send_error(
                 msg["id"],
@@ -1821,15 +1873,14 @@ async def ws_remove_neighbor(hass, connection, msg):
         # the response so the user knows the login wasn't confirmed.
         login_unconfirmed = False
         if password:
-            login_result = await coordinator.api.mesh_core.commands.send_login_sync(
-                contact, password
-            )
+            login_result = await _parent_command(hass, connection, msg, coordinator, 'send_login_sync', contact, password)
             login_unconfirmed = login_result is None
 
         # Send neighbor.remove command to the repeater
-        cmd_result = await coordinator.api.mesh_core.commands.send_cmd(
-            contact, f"neighbor.remove {neighbor_pubkey}"
-        )
+        cmd_result = await _parent_command(hass, connection, msg, coordinator, 'send_cmd', contact, f'neighbor.remove {neighbor_pubkey}')
+        failure = _command_failure(cmd_result)
+        if failure:
+            raise HomeAssistantError(failure)
 
         resp_text = _format_event_response(cmd_result)
         if login_unconfirmed:
@@ -1873,10 +1924,10 @@ async def ws_remove_neighbor(hass, connection, msg):
             sensor_key = f"{target_prefix}:{neighbor_pubkey}"
             coordinator._created_neighbor_sensors.discard(sensor_key)
 
-            # Persist updated data — await so that a failure surfaces in
-            # the WS response rather than being silently logged via the
-            # background-task harness.
-            await coordinator._save_neighbor_data()
+            # Newer parents queue a debounced save synchronously.
+            save = coordinator._save_neighbor_data()
+            if inspect.isawaitable(save):
+                await save
         except Exception as cleanup_ex:
             _LOGGER.warning(
                 "Inlined remove_single_neighbor cleanup failed for %s/%s: %s",
@@ -2084,48 +2135,14 @@ async def ws_mark_read(hass, connection, msg):
 
 # ─── Identity Management ─────────────────────────────────────────────────
 #
-# This identity-import flow was redesigned after the original approach
-# delegated to ``meshcore.execute_command`` and used the wrong key format
-# (``seed || verify_key`` instead of the SHA-512-expanded clamped secret
-# the firmware actually accepts), then silently swallowed firmware ERRORs
-# because the service-call path had no surface to detect them. The
-# ``return_response=True`` workaround tripped HA's framework validation
-# on OK-with-empty-payload responses.
-#
-# The redesign abandons the service-delegation path and calls the SDK
-# directly:
-#
-# 1. ``coord.api.mesh_core.commands.import_private_key(seed_bytes)`` —
-#    direct SDK call returning an ``Event``. ``EventType.ERROR`` is
-#    inspected and surfaced as ``IdentityImportError`` so the firmware's
-#    rejection (e.g. ``ERR_CODE_ILLEGAL_ARG``) reaches the user instead
-#    of getting buried as a false success.
-# 2. ``send_appstart`` + ``_cache_self_info_event`` — replicates
-#    services.py's ``_SELF_INFO_COMMANDS`` post-call refresh inline so we
-#    don't depend on the service for the cache update.
-# 3. ``coord.api.mesh_core.commands.reboot()`` — direct SDK call. The
-#    firmware only switches identities on next boot.
-# 4. Brief ``asyncio.sleep`` while transport-layer reconnect completes
-#    (SDK ``connection_manager`` handles the reconnect itself).
-# 5. ``hass.config_entries.async_reload(meshcore_entry_id)`` — fires the
-#    pubkey-detection hook in upstream ``async_setup_entry``
-#    (meshcore-ha PR #169, ``__init__.py:319-348``), which calls
-#    ``_migrate_entity_ids(old_prefix, new_prefix)`` and creates the
-#    ``pubkey_changed_<entry_id>`` repair issue automatically.
-# 6. Verify-after-reload guard: re-resolve the coordinator and confirm
-#    ``coord.pubkey != old_pubkey``. Belt-and-suspenders against any
-#    "OK + reload + same pubkey" edge case where the firmware accepted
-#    the import but failed to persist.
-#
-# Each step emits a streaming progress event so the panel modal can show
-# a step checklist instead of a single toast — terminal state still uses
-# ``send_result`` / ``send_error`` (the standard HA WS pattern;
-# ``subscribeMessage`` on the frontend is the matching call).
-#
-# Key format: ``_seed_to_meshcore_priv(seed)`` expands a 32-byte Ed25519
-# seed into the firmware's 64-byte expanded clamped secret form (RFC
-# 8032 §5.1.5). Firmware-truth-derived; verified by scalar-mult parity
-# against the device's stored pubkey.
+# Identity commands intentionally use the parent radio coordinator rather than
+# its generic command service, which excludes private-key operations. The
+# administrator-only handlers retain the panel's explicit confirmation flow.
+# Import and reboot own both the mesh-request lease and command transaction;
+# reconnect and entry reload run after releasing those resources.
+
+
+_IDENTITY_TIMEOUT = 45
 
 
 class IdentityImportError(Exception):
@@ -2167,7 +2184,70 @@ def _seed_to_meshcore_priv(seed: bytes) -> bytes:
     return bytes(h)
 
 
-async def _do_identity_change(
+async def _do_identity_change(hass, connection, msg_id, coord, meshcore_entry_id, old_pubkey, seed_bytes):
+    """Allow only one Chat identity change per entry through verification."""
+    locks = hass.data.setdefault(DOMAIN, {}).setdefault("identity_change_locks", {})
+    lock = locks.setdefault(meshcore_entry_id, asyncio.Lock())
+    if lock.locked():
+        raise IdentityImportError("An identity change is already in progress")
+    async with lock:
+        try:
+            await _change_identity(hass, connection, msg_id, coord, meshcore_entry_id, old_pubkey, seed_bytes)
+        except IdentityImportError:
+            raise
+        except Exception:
+            # SDK exceptions may include command arguments, including keys.
+            raise IdentityImportError("Identity change failed; device state is unverified") from None
+
+
+async def _modern_identity_import(api, seed_bytes, connection, msg_id):
+    """Serialize the sensitive commands, then await a validated reconnect."""
+    from custom_components.meshcore.radio import RadioUnavailable
+
+    reconnected = asyncio.Event()
+    remove_hook = api.add_connect_hook(reconnected.set)
+    try:
+        async with asyncio.timeout(_IDENTITY_TIMEOUT):
+            async with api.mesh_lease():
+                async with api.transaction():
+                    result = await api.exchange("import_private_key", seed_bytes)
+                    _check_identity_import(result)
+                    connection.send_message(websocket_api.event_message(msg_id, {"step": "rebooting"}))
+                    # Discard any reconnect that preceded this reboot attempt.
+                    reconnected.clear()
+                    try:
+                        result = await api.exchange("reboot")
+                    except RadioUnavailable:
+                        # A reboot may close the link before exchange returns.
+                        # Only a fresh validated connection and exact identity
+                        # verification can complete this uncertain write.
+                        if api.connected:
+                            raise
+                    else:
+                        if _command_failure(result):
+                            raise IdentityImportError("Device rejected reboot")
+            connection.send_message(websocket_api.event_message(msg_id, {"step": "reconnecting"}))
+            await reconnected.wait()
+            if not api.connected:
+                raise IdentityImportError("Device disconnected during reconnection")
+    except TimeoutError as ex:
+        raise IdentityImportError("Identity change timed out; device state is unverified") from ex
+    finally:
+        remove_hook()
+
+
+def _check_identity_import(result):
+    """Only an explicit firmware OK permits a subsequent reboot."""
+    from meshcore.events import EventType
+
+    if getattr(result, "type", None) != EventType.OK:
+        payload = getattr(result, "payload", {})
+        code = payload.get("code_string") if isinstance(payload, dict) else None
+        safe_code = code if isinstance(code, str) and code.startswith("ERR_CODE_") and all(c.isupper() or c == "_" for c in code) else "unknown"
+        raise IdentityImportError(f"Firmware did not accept the identity key: {safe_code}")
+
+
+async def _change_identity(
     hass,
     connection,
     msg_id,
@@ -2191,70 +2271,48 @@ async def _do_identity_change(
     user-supplied 128-hex input pass ``bytes.fromhex(raw)`` directly
     (already firmware-native, matches ``export_private_key`` output).
     """
-    from meshcore.events import EventType
+    from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-    # Step 2 — import. Direct SDK call; inspect Event.type for ERROR
-    # (the service path silently swallowed firmware errors and the
-    # return_response=True workaround tripped HA's framework validation
-    # on empty-payload OK responses).
-    connection.send_message(
-        websocket_api.event_message(msg_id, {"step": "importing"})
-    )
-    result = await coord.api.mesh_core.commands.import_private_key(seed_bytes)
-    if result is None or getattr(result, "type", None) == EventType.ERROR:
-        code = "unknown"
-        if result is not None:
-            payload = getattr(result, "payload", None) or {}
-            code = payload.get("code_string") or payload.get("error_code") or "unknown"
-        raise IdentityImportError(f"firmware rejected key: {code}")
-
-    # Step 2b — refresh self_info (mimics services.py _SELF_INFO_COMMANDS
-    # post-call refresh, services.py:656-664). Wrapped in try/except: pass
-    # because the reload re-fetches anyway and a self_info hiccup
-    # shouldn't abort the chain. The call itself must be present
-    # (covered by a unit assertion).
     try:
-        appstart = await coord.api.mesh_core.commands.send_appstart()
-        coord.api._cache_self_info_event(appstart)
-    except Exception:  # pragma: no cover - defensive
-        _LOGGER.debug("self_info refresh after import_private_key failed; "
-                      "the upcoming entry reload will re-fetch it")
+        expected_pubkey = crypto_scalarmult_ed25519_base_noclamp(seed_bytes[:32]).hex()
+    except (ValueError, RuntimeError) as ex:
+        raise IdentityImportError("Invalid identity key") from ex
 
-    # Step 3 — reboot. Firmware only switches identity on next boot.
-    connection.send_message(
-        websocket_api.event_message(msg_id, {"step": "rebooting"})
-    )
-    await coord.api.mesh_core.commands.reboot()
-
-    # Step 4 — wait for the device to come back. The SDK's
-    # connection_manager handles transport-level reconnect; we just need
-    # to not race the reload. 3 seconds is a placeholder.
-    # TODO: replace with EventType.CONNECTED await once the SDK exposes
-    # a clean reconnect-completed signal.
-    connection.send_message(
-        websocket_api.event_message(msg_id, {"step": "reconnecting"})
-    )
-    await asyncio.sleep(3.0)
+    connection.send_message(websocket_api.event_message(msg_id, {"step": "importing"}))
+    if _modern_parent(coord.api):
+        await _modern_identity_import(coord.api, seed_bytes, connection, msg_id)
+    else:
+        result = await coord.api.mesh_core.commands.import_private_key(seed_bytes)
+        _check_identity_import(result)
+        try:
+            appstart = await coord.api.mesh_core.commands.send_appstart()
+            coord.api._cache_self_info_event(appstart)
+        except Exception:
+            # Legacy parents refresh their identity again during entry setup.
+            pass
+        connection.send_message(websocket_api.event_message(msg_id, {"step": "rebooting"}))
+        await coord.api.mesh_core.commands.reboot()
+        connection.send_message(websocket_api.event_message(msg_id, {"step": "reconnecting"}))
+        await asyncio.sleep(3.0)
 
     # Step 5 — reload the config entry. PR #169's async_setup_entry hook
     # detects the new pubkey and migrates entity IDs automatically.
     connection.send_message(
         websocket_api.event_message(msg_id, {"step": "reloading"})
     )
-    await hass.config_entries.async_reload(meshcore_entry_id)
+    async with asyncio.timeout(_IDENTITY_TIMEOUT):
+        if not await hass.config_entries.async_reload(meshcore_entry_id):
+            raise IdentityImportError("Parent entry reload failed; device state is unverified")
 
-    # Step 6 — verify the pubkey actually changed. The
-    # post-reload coordinator should reflect the new identity; if it
-    # doesn't, the import didn't actually persist on the device and the
-    # success path would be a lie.
+    # The selected entry must own exactly the requested public identity.
     connection.send_message(
         websocket_api.event_message(msg_id, {"step": "verifying"})
     )
     new_coord = _get_coordinator(hass, meshcore_entry_id)
     new_pubkey = new_coord.pubkey if new_coord else None
-    if not new_pubkey or new_pubkey == old_pubkey:
+    if not isinstance(new_pubkey, str) or new_pubkey.lower() != expected_pubkey:
         raise IdentityImportError(
-            "device pubkey unchanged after reload — import did not take effect"
+            "Device identity after reload does not match the requested key"
         )
 
     # Terminal success — the data ride on a final ``done`` event_message
@@ -2473,7 +2531,7 @@ async def ws_add_contact(hass, connection, msg):
     # Execute the SDK add_contact command
     try:
         api = coordinator.api
-        if not api.connected or not api.mesh_core:
+        if not api.connected or (not _modern_parent(api) and not api.mesh_core):
             connection.send_error(msg["id"], "not_connected", "Device not connected")
             return
 
@@ -2493,6 +2551,7 @@ async def ws_add_contact(hass, connection, msg):
                     },
                     blocking=True,
                     return_response=True,
+                    context=connection.context(msg),
                 )
             except Exception as ex:
                 # execute_command returns None for a bodyless-OK SDK result (an
@@ -2538,6 +2597,9 @@ async def ws_add_contact(hass, connection, msg):
 
         # Fallback — inlined SDK add + manual coordinator sync. Correct on
         # integrations without the routed contact handling.
+        if _modern_parent(api):
+            connection.send_error(msg["id"], "service_unavailable", "Parent contact management service is unavailable")
+            return
         result = await api.mesh_core.commands.add_contact(contact_data)
 
         from meshcore.events import EventType
@@ -2611,7 +2673,7 @@ async def ws_remove_contact(hass, connection, msg):
     # Execute the SDK remove_contact command
     try:
         api = coordinator.api
-        if not api.connected or not api.mesh_core:
+        if not api.connected or (not _modern_parent(api) and not api.mesh_core):
             connection.send_error(msg["id"], "not_connected", "Device not connected")
             return
 
@@ -2630,6 +2692,7 @@ async def ws_remove_contact(hass, connection, msg):
                     },
                     blocking=True,
                     return_response=True,
+                    context=connection.context(msg),
                 )
             except Exception as ex:
                 # execute_command returns None for a bodyless-OK SDK result (an
@@ -2676,6 +2739,9 @@ async def ws_remove_contact(hass, connection, msg):
         # Fallback — inlined SDK remove + manual coordinator sync. Correct on
         # integrations without the routed entity cleanup (no per-contact
         # binary_sensor exists there to orphan).
+        if _modern_parent(api):
+            connection.send_error(msg["id"], "service_unavailable", "Parent contact management service is unavailable")
+            return
         result = await api.mesh_core.commands.remove_contact(contact_data)
 
         from meshcore.events import EventType
@@ -2814,10 +2880,9 @@ async def ws_trace(
     (Mesh.cpp:41-66), pre-registered PATH_RESPONSE listener, 15 s
     flood-discovery floor, ``added_to_node`` gate, etc.
 
-    Explicit-path traces (``msg["path"]`` supplied) bypass the service
-    and call ``mesh_core.commands.send_trace`` directly, preserving the
-    Session 53 / Session 55 Addendum 2 workaround for production cases
-    where flood path discovery doesn't return a PATH_RESPONSE.
+    Explicit-path traces (``msg["path"]`` supplied) retain their local
+    reply correlation. Modern parents execute the send through the
+    authorized command service; older parents use their SDK interface.
 
     The frontend's ``TraceResult`` shape (``frontend/src/api.ts:355``)
     is preserved unchanged across both branches — no frontend changes.
@@ -2846,6 +2911,7 @@ async def ws_trace(
             service_data,
             blocking=True,
             return_response=True,
+            context=connection.context(msg),
         )
     except Exception as ex:
         _ws_send_error_safe(
@@ -2882,23 +2948,13 @@ async def _ws_trace_explicit(
     connection: websocket_api.ActiveConnection,
     msg: dict,
 ) -> None:
-    """Inlined explicit-path trace handler.
+    """Trace an explicit route when flood discovery cannot find one.
 
-    When the user supplies an explicit comma-hex hop sequence via the
-    ``path`` parameter, bypass ``meshcore.trace`` and call
-    ``mesh_core.commands.send_trace`` directly. The upstream service
-    (PR #216) does not accept an explicit-path argument; if it gains
-    one, this branch can collapse into the service call and the
-    SDK-level coupling here disappears.
-
-    Why this branch exists: Session 53 (2026-04-20) DEBUG capture
-    showed multi-hop flood path discovery does not reliably return a
-    PATH_RESPONSE for all reachable targets (e.g. Otay RPTR via
-    ca.cv.main-st: firmware accepts + broadcasts the request, but no
-    response ever arrives). The native MeshCoreOne iOS app works
-    around this by letting the user type the hop sequence manually;
-    this branch mirrors that workaround.
+    Modern parents send through execute_command, retaining user context
+    and radio coordination. Older parents keep the legacy SDK path.
+    The raw reply feed is matched by tag and, on modern parents, entry.
     """
+
     import random
 
     coordinator = _get_coordinator(hass, msg.get("entry_id"))
@@ -2907,7 +2963,7 @@ async def _ws_trace_explicit(
         return
 
     api = coordinator.api
-    if not api.connected or not api.mesh_core:
+    if not api.connected or (not _modern_parent(api) and not api.mesh_core):
         connection.send_error(msg["id"], "not_connected", "Device not connected")
         return
 
@@ -2959,6 +3015,8 @@ async def _ws_trace_explicit(
 
         def _on_raw_event(event):
             data = event.data or {}
+            if _modern_parent(api) and (data.get("entry_id") or data.get("device")) != coordinator.config_entry.entry_id:
+                return
             if "TRACE_DATA" not in (data.get("event_type", "") or ""):
                 return
             payload = data.get("payload") or {}
@@ -2969,9 +3027,7 @@ async def _ws_trace_explicit(
 
         try:
             from meshcore.events import EventType as _EventType
-            send_result = await api.mesh_core.commands.send_trace(
-                0, tag, flags, trace_path_arg
-            )
+            send_result = await _parent_command(hass, connection, msg, coordinator, "send_trace", 0, tag, flags, trace_path_arg)
             if send_result is None or getattr(send_result, "type", None) == _EventType.ERROR:
                 reason = "no_response"
                 if send_result is not None and isinstance(send_result.payload, dict):

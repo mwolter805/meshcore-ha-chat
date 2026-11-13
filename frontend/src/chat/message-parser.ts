@@ -145,6 +145,7 @@ export function toClientMessage(stored: StoredMessage): ChatMessage {
   const derived = deriveFloodScope(stored.rx_log_data);
   return {
     id: stored.id,
+    sendId: stored.send_id,
     sender: stored.sender,
     text: stored.text,
     timestamp: new Date(stored.timestamp),
@@ -157,6 +158,8 @@ export function toClientMessage(stored: StoredMessage): ChatMessage {
       ? {
           status: stored.delivery_status as DeliveryStatus['status'],
           ackReceived: stored.ack_received,
+          repeatsObservable: stored.repeats_observable,
+          collecting: stored.collecting,
           repeaterCount: stored.repeater_count,
           roundTripMs: stored.round_trip_ms,
         }

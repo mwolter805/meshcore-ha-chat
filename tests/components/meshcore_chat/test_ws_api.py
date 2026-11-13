@@ -30,7 +30,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -67,6 +67,9 @@ class _Connection:
 
     def send_result(self, msg_id: int, result: Any = None) -> None:
         self.results.append((msg_id, result))
+
+    def context(self, msg: dict) -> Context:
+        return Context(user_id="test-admin")
 
     def send_error(self, msg_id: int, code: str, message: str) -> None:
         self.errors.append((msg_id, code, message))
@@ -140,6 +143,36 @@ def _make_coordinator(**attrs) -> MagicMock:
     for k, v in attrs.items():
         setattr(coord, k, v)
     return coord
+
+
+async def test_clear_discovered_contacts_invalidates_cached_list(hass):
+    cached = [{"public_key": "ab" * 32}]
+    coordinator = _make_coordinator(_discovered_contacts={"ab" * 32: cached[0]})
+    coordinator._store.async_save = AsyncMock()
+    coordinator.get_all_contacts.side_effect = lambda: list(cached)
+    coordinator.invalidate_contacts.side_effect = cached.clear
+    hass.data[MESHCORE_DOMAIN] = {"meshcore_entry": coordinator}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_clear_discovered_contacts, hass, conn, {"id": 1, "entry_id": "meshcore_entry"})
+    assert not conn.errors
+    assert conn.results == [(1, {"removed": 1})]
+    coordinator.invalidate_contacts.assert_called_once()
+    assert coordinator.async_set_updated_data.call_args.args[0]["contacts"] == []
+
+
+async def test_remove_neighbor_accepts_synchronous_save_scheduler(hass, caplog):
+    coordinator = _make_coordinator(_tracked_repeaters=[{"pubkey_prefix": "rpt1"}])
+    coordinator.api.mesh_core.get_contact_by_key_prefix.return_value = {"public_key": "rpt1deadbeef"}
+    coordinator.api.mesh_core.commands.send_cmd = AsyncMock(return_value="ok")
+    queued = []
+    coordinator._save_neighbor_data = MagicMock(side_effect=lambda: queued.append(True))
+    hass.data[MESHCORE_DOMAIN] = {"meshcore_entry": coordinator}
+    conn = _Connection()
+    await _call_ws(ws_api.ws_remove_neighbor, hass, conn, {"id": 1, "entry_id": "meshcore_entry", "target_prefix": "rpt1", "neighbor_pubkey": "ab" * 32})
+    assert queued == [True]
+    assert not conn.errors
+    assert conn.results[0][1]["success"] is True
+    assert "cleanup failed" not in caplog.text
 
 
 @pytest.fixture
@@ -702,6 +735,83 @@ async def test_ws_get_device_config_error_no_coordinator(
     conn = _Connection()
     await _call_ws(ws_api.ws_get_device_config, hass, conn, {"id": 1})
     assert conn.errors[0][1] == "not_found"
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2, None, True, "1", -1, 3])
+async def test_device_mode_copies_only_valid_query_field(hass, coordinator, mode):
+    coordinator.api.self_info = {"path_hash_mode": 2}
+    event = types.SimpleNamespace(type="DEVICE_INFO", payload={
+        "path_hash_mode": mode, "synthetic_private_field": "sentinel",
+        "name": "must not overwrite cached name",
+    })
+    coordinator.api.mesh_core.commands.send_device_query = AsyncMock(side_effect=AssertionError("no raw query"))
+    conn = _Connection()
+    with patch("homeassistant.core.ServiceRegistry.has_service", return_value=True), patch("homeassistant.core.ServiceRegistry.async_call", AsyncMock(return_value=event.payload)) as service:
+        await _call_ws(ws_api.ws_get_device_config, hass, conn, {"id": 1})
+    assert service.await_args.args[2]["command"] == "send_device_query()"
+    assert service.await_args.args[2]["entry_id"] == coordinator.config_entry.entry_id
+    assert service.await_args.kwargs["context"].user_id == "test-admin"
+    coordinator.api.mesh_core.commands.send_device_query.assert_not_awaited()
+    response = conn.results[0][1]
+    expected = mode if type(mode) is int and mode in (0, 1, 2) else None
+    assert response["path_hash_mode"] == expected
+    assert response["name"] == coordinator.name
+    assert "synthetic_private_field" not in response
+    assert "sentinel" not in str(response)
+
+
+@pytest.mark.parametrize("outcome", ["missing", "timeout", "unsupported", "no_response", "rejected"])
+async def test_device_mode_unavailable_preserves_cached_fields(hass, coordinator, outcome):
+    response = {"error": "rejected"} if outcome == "rejected" else None if outcome == "no_response" else {}
+    query = AsyncMock(return_value=response)
+    if outcome == "timeout":
+        query.side_effect = TimeoutError()
+    coordinator.api.mesh_core.commands.send_device_query = AsyncMock(side_effect=AssertionError("no raw query"))
+    conn = _Connection()
+    with patch("homeassistant.core.ServiceRegistry.has_service", return_value=outcome != "unsupported"), patch("homeassistant.core.ServiceRegistry.async_call", query):
+        await _call_ws(ws_api.ws_get_device_config, hass, conn, {"id": 1})
+    assert conn.results[0][1]["path_hash_mode"] is None
+    assert conn.results[0][1]["name"] == coordinator.name
+    coordinator.api.mesh_core.commands.send_device_query.assert_not_awaited()
+
+
+async def test_device_mode_query_requires_admin_even_on_legacy_parent(hass, coordinator):
+    conn = _Connection()
+    conn.user.is_admin = False
+    with patch("homeassistant.core.ServiceRegistry.async_call", AsyncMock(side_effect=AssertionError("non-admin query"))) as service:
+        await _call_ws(ws_api.ws_get_device_config, hass, conn, {"id": 1})
+    service.assert_not_awaited()
+    assert conn.results[0][1]["path_hash_mode"] is None
+    assert conn.results[0][1]["name"] == coordinator.name
+
+
+@pytest.mark.parametrize("handler", [ws_api.ws_regenerate_identity, ws_api.ws_import_identity])
+async def test_modern_identity_uses_coordinated_route(hass, coordinator, handler, monkeypatch):
+    class ModernRadio:
+        async def exchange(self):
+            raise AssertionError("no uncoordinated invocation")
+
+        @property
+        def mesh_core(self):
+            raise AssertionError("no raw SDK bypass")
+
+    from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
+    coordinator.api = ModernRadio()
+    seed = bytes(range(32))
+    expected = crypto_scalarmult_ed25519_base_noclamp(ws_api._seed_to_meshcore_priv(seed)[:32]).hex()
+    async def reload(_):
+        coordinator.pubkey = expected
+        return True
+    monkeypatch.setattr(type(hass.config_entries), "async_reload", AsyncMock(side_effect=reload))
+    monkeypatch.setattr(ws_api.os, "urandom", lambda _: seed)
+    coordinated = AsyncMock()
+    monkeypatch.setattr(ws_api, "_modern_identity_import", coordinated)
+    conn = _Connection()
+    await _call_ws(handler, hass, conn, {"id": 1, "private_key": seed.hex()})
+    coordinated.assert_awaited_once()
+    assert coordinated.await_args.args[:2] == (coordinator.api, ws_api._seed_to_meshcore_priv(seed))
+    assert conn.results == [(1, {"success": True})]
+    assert conn.errors == []
 
 
 # ─── ws_set_device_config (DESTRUCTIVE) ─────────────────────────────────
@@ -2179,7 +2289,7 @@ def patched_event_type(monkeypatch):
 def _identity_streaming_mocks(
     hass, coordinator, monkeypatch,
     *,
-    new_pubkey="cafef00d" * 8,
+    new_pubkey=None,
     import_event=None,
     reload_changes_pubkey=True,
 ):
@@ -2215,7 +2325,9 @@ def _identity_streaming_mocks(
 
     async def _reload(_entry_id):
         if reload_changes_pubkey:
-            coordinator.pubkey = new_pubkey
+            from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
+            imported = coordinator.api.mesh_core.commands.import_private_key.await_args.args[0]
+            coordinator.pubkey = new_pubkey or crypto_scalarmult_ed25519_base_noclamp(imported[:32]).hex()
         return True
 
     reload_mock = AsyncMock(side_effect=_reload)
@@ -2288,10 +2400,7 @@ async def test_ws_regenerate_identity_streaming_happy(
       ``new_pubkey`` (post-reload).
     """
     old_pubkey = coordinator.pubkey  # set by _make_coordinator
-    new_pubkey = "cafef00d" * 8
-    reload_mock = _identity_streaming_mocks(
-        hass, coordinator, monkeypatch, new_pubkey=new_pubkey
-    )
+    reload_mock = _identity_streaming_mocks(hass, coordinator, monkeypatch)
 
     conn = _Connection()
     await _call_ws(ws_api.ws_regenerate_identity, hass, conn, {"id": 1})
@@ -2310,7 +2419,7 @@ async def test_ws_regenerate_identity_streaming_happy(
     done_evt = conn.event_messages[-1]
     assert done_evt["success"] is True
     assert done_evt["old_pubkey"] == old_pubkey
-    assert done_evt["new_pubkey"] == new_pubkey
+    assert done_evt["new_pubkey"] == coordinator.pubkey
     assert "Device rebooted" in done_evt["warning"]
 
     # SDK call sequence: import_private_key called with 64-byte expanded seed.
@@ -2447,7 +2556,7 @@ async def test_ws_regenerate_identity_verify_failed_when_pubkey_unchanged(
     assert len(conn.errors) == 1
     _, code, message = conn.errors[0]
     assert code == "import_rejected"
-    assert "pubkey unchanged" in message.lower()
+    assert "does not match" in message.lower()
 
     # All six in-flight steps emitted; the "done" event was NOT — the
     # verify step raised before reaching the success branch.

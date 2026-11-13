@@ -57,6 +57,8 @@ export interface MeshcoreRegistryResult {
  */
 export function classifyEntity(entity: any): EntityInfo | null {
   const eid: string = entity.entity_id;
+  // The console state counts transcript rows, not radio telemetry.
+  if (eid.includes('_cli_console') || String(entity.unique_id ?? '').endsWith('_cli_console')) return null;
   // Read device_class from any of the three places HA might surface it:
   //   - entity.original_device_class (registry; integration-declared, immutable)
   //   - entity.device_class (registry; user override, often null)

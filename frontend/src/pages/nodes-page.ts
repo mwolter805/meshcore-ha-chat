@@ -667,7 +667,7 @@ export class NodesPage extends LitElement {
       <div class="nodes-grid">
         ${this._displayedContacts.map((c) => html`
           <div @click=${() => this._openNodeDetail(c)}>
-            <meshcore-contact-card .contact=${c as Contact}></meshcore-contact-card>
+            <meshcore-chat-contact-card .contact=${c as Contact}></meshcore-chat-contact-card>
           </div>
         `)}
       </div>

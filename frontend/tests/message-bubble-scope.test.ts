@@ -5,6 +5,14 @@ import { html, render } from 'lit';
 import '../src/components/message-bubble';
 import type { ChatMessage, MessageGroup } from '../src/types';
 
+it('distinguishes waiting, unobservable and observed zero-repeat sends', () => {
+  const bubble = document.createElement('meshcore-message-bubble') as any;
+  expect(bubble._getStatusLabel({ status: 'sent', collecting: true, repeaterCount: 0 })).toBe('Waiting...');
+  expect(bubble._getStatusLabel({ status: 'sent', repeatsObservable: false, collecting: false, repeaterCount: 0 })).toBe('Unconfirmed');
+  expect(bubble._getStatusLabel({ status: 'sent', repeatsObservable: true, collecting: false, repeaterCount: 0 })).toBe('Unheard');
+  expect(bubble._getStatusLabel({ status: 'failed', repeatsObservable: false })).toBe('Failed');
+});
+
 // Change 6 — inbound region scope in the bubble timestamp line.
 // "*" renders as "🌐 all regions", a region name verbatim, nothing when
 // absent. Incoming bubbles only — the outbound scope is shown by the

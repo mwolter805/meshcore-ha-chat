@@ -94,6 +94,7 @@ export class SettingsPage extends LitElement {
   @state() private _error: string | null = null;
   @state() private _editValues: Record<string, unknown> = {};
   @state() private _saving = false;
+  private _deviceConfigGeneration = 0;
   @state() private _commandDialogOpen = false;
   @state() private _confirmAction: ConfirmAction | null = null;
   @state() private _confirmDialogOpen = false;
@@ -696,6 +697,7 @@ export class SettingsPage extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    this._deviceConfigGeneration++;
     if (this._statusMessageTimeout !== null) {
       clearTimeout(this._statusMessageTimeout);
       this._statusMessageTimeout = null;
@@ -704,6 +706,12 @@ export class SettingsPage extends LitElement {
 
   updated(changedProperties: Map<string, unknown>) {
     if (changedProperties.has('config')) {
+      const previous = changedProperties.get('config') as PanelConfig | undefined;
+      if (previous?.entry_id !== this.config?.entry_id) {
+        this._editValues = {};
+        this._deviceConfig = null;
+        this._saving = false;
+      }
       this._loadDeviceConfig();
     }
     // Load entity registry once hass is available
@@ -715,19 +723,26 @@ export class SettingsPage extends LitElement {
   private async _loadDeviceConfig() {
     if (!this.hass) return;
 
+    const generation = ++this._deviceConfigGeneration;
+    const entryId = this.config?.entry_id;
+    const current = () => generation === this._deviceConfigGeneration && entryId === this.config?.entry_id;
+
     this._loading = true;
     this._error = null;
 
     try {
-      this._deviceConfig = await getDeviceConfig(this.hass, this.config?.entry_id);
+      const config = await getDeviceConfig(this.hass, entryId);
+      if (!current()) return;
+      this._deviceConfig = config;
       // Initialize location source from backend instead of defaulting to 'manual'
       if (this._deviceConfig?.location_source) {
         this._locationSource = this._deviceConfig.location_source as 'gps' | 'manual' | 'ha_location';
       }
     } catch (error) {
+      if (!current()) return;
       this._error = `Failed to load device configuration: ${String(error)}`;
     } finally {
-      this._loading = false;
+      if (current()) this._loading = false;
     }
   }
 
@@ -1100,6 +1115,14 @@ export class SettingsPage extends LitElement {
       'path_hash_mode',
     ]);
 
+    const currentPathHashMode =
+      this._editValues['path_hash_mode'] ??
+      this._deviceConfig.path_hash_mode;
+
+    const validPathHashMode =
+      typeof currentPathHashMode === 'number' &&
+      [0, 1, 2].includes(currentPathHashMode);
+
     return html`
       <div class="section-row">
         <div class="form-group-inline">
@@ -1177,12 +1200,29 @@ export class SettingsPage extends LitElement {
           <select
             class="form-select"
             @change=${(e: Event) => {
-              this._editValues['path_hash_mode'] = Number((e.target as HTMLSelectElement).value);
+              const value = (e.target as HTMLSelectElement).value;
+              if (value === '') return;
+
+              this._editValues = {
+                ...this._editValues,
+                path_hash_mode: Number(value),
+              };
             }}>
-            ${[[0, '0 - 1 byte'], [1, '1 - 2 byte'], [2, '2 - 3 byte']].map(([val, label]) => {
-              const current = this._editValues['path_hash_mode'] ?? this._deviceConfig!.path_hash_mode ?? 0;
-              return html`<option value=${val} ?selected=${Number(current) === val}>${label}</option>`;
-            })}
+            <option value="" disabled ?selected=${!validPathHashMode}>
+	      Unknown (unavailable)
+            </option>
+	    <option
+	      value="0"
+	      ?selected=${validPathHashMode && currentPathHashMode === 0}
+	    >0 - 1 byte</option>
+	    <option
+	      value="1"
+	      ?selected=${validPathHashMode && currentPathHashMode === 1}
+	    >1 - 2 byte</option>
+	    <option
+	      value="2"
+	      ?selected=${validPathHashMode && currentPathHashMode === 2}
+	    >2 - 3 byte</option>
           </select>
         </div>
       </div>
@@ -1339,6 +1379,9 @@ export class SettingsPage extends LitElement {
 
   private async _handleApply(sectionId: string) {
     if (!this.hass || !this._deviceConfig) return;
+    const generation = this._deviceConfigGeneration;
+    const entryId = this.config?.entry_id;
+    const current = () => generation === this._deviceConfigGeneration && entryId === this.config?.entry_id;
 
     let keysToApply: string[] = [];
 
@@ -1361,7 +1404,8 @@ export class SettingsPage extends LitElement {
     this._saving = true;
 
     try {
-      const result = await setDeviceConfig(this.hass, settings, this.config?.entry_id);
+      const result = await setDeviceConfig(this.hass, settings, entryId);
+      if (!current()) return;
       if (result.success) {
         // Optimistically update local config with the values just applied.
         // Radio settings won't be reflected by send_appstart() until a reboot,
@@ -1391,9 +1435,10 @@ export class SettingsPage extends LitElement {
         this._showStatusMessage('Save failed', 'error');
       }
     } catch (error) {
+      if (!current()) return;
       this._showStatusMessage(`Error: ${String(error)}`, 'error');
     } finally {
-      this._saving = false;
+      if (current()) this._saving = false;
     }
   }
 

@@ -4,6 +4,52 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] - Unreleased
+
+This release makes MeshCore Chat work properly with meshcore-ha 3.x. It has fixes only, no new features.
+
+### Tested with
+
+- **meshcore-ha v3.0.5**, with the full test set. Also run against v3.0.4.
+- **meshcore-ha v2.7.0 and v2.10.0**, with a smaller check only.
+- **Home Assistant** 2025.6.0 and 2026.10.4 in tests, and 2026.11.1 on a live installation.
+- **meshcore_py** 2.3.17.
+
+### Requirements
+
+These are the same as meshcore-ha v3.0.5 itself requires.
+
+- Home Assistant 2025.6.0 or newer. This is a higher minimum than MeshCore Chat 0.3.1 had.
+- meshcore-ha v2.7.0 or newer.
+- MeshCore Chat installs no Python packages of its own. It uses two that meshcore-ha installs: `meshcore` (the meshcore_py library) 2.3.11 or newer, and `pynacl` 1.5.0 or newer.
+
+### Fixed
+
+- **Region list is empty on meshcore-ha 3.x (#50, #53).** The channel dialog now reads your regions from where meshcore-ha 3.x keeps them. Older meshcore-ha versions still work. Clearing the region list is respected. The same fix was offered in #54. Thanks to [@Poket-Jony](https://github.com/Poket-Jony).
+- **Path Hash Mode always shows "1 byte".** Settings now reads the real value from the radio. If the radio does not answer, it shows "Unknown" and does not guess. Thanks to [@vharbich](https://github.com/vharbich) for [#49](https://github.com/mwolter805/meshcore-ha-chat/pull/49).
+- **The panel breaks when the separate MeshCore card is also installed (#39).** Both used the same internal name for a page element. MeshCore Chat now uses its own name, so the two can be installed together.
+- **Home Assistant warns about a deprecated device lookup (#45).** MeshCore Chat now uses the newer lookup, and looks devices up for the selected radio only.
+- **Commands on meshcore-ha 3.x.** Commands now go through meshcore-ha's own command service. This keeps its permission checks, sends the command to the radio you selected, and shows its real error messages.
+- **Identity import and regenerate on meshcore-ha 3.x.** An administrator can import or regenerate the radio's identity key again. MeshCore Chat waits for the radio to reconnect and checks that the new identity is the one that was requested. If the radio rejects the key, it is not rebooted.
+- **Delivery status.** A delivered channel message keeps its status. "Collecting", "cannot be observed" and "no repeaters heard it" are now shown as three different states.
+- **Failed sends.** If sending fails with an error, your text is kept so you can try again, and no other message is marked as failed by mistake.
+- **Messages loading at the same time as status updates.** They no longer overwrite each other.
+- **Direct messages from a sender with no name** now appear right away.
+- **Too-long messages** are still refused, and your text is kept. They are never cut short or split without telling you.
+- **Smaller fixes:** replies to remote commands go to the right radio, the node list refreshes after discovered contacts are cleared, and the CLI Console counter no longer appears among device readings.
+
+### Maintenance
+
+- The panel is now built with TypeScript 7 and a newer bundler. The panel file that ships is byte for byte the same as one built with the old tools.
+- The automated checks on GitHub use newer versions of their tools.
+
+### Known limitations
+
+- If the radio is offline but the send call still returns normally, a message can stay "sending". meshcore-ha's failure event does not say which message failed, so MeshCore Chat cannot always tell.
+- A message marked as failed in the panel, and its kept text, are remembered only until you reload the page.
+- Identity import and regenerate, and saving every Path Hash Mode, were tested with a simulated radio. They were not tested on a real radio through a reboot.
+- Not every combination of Home Assistant and meshcore-ha versions was tested. See "Tested with". meshcore-ha 2.x had only a smaller check; if you can, use meshcore-ha 3.0.5.
+
 ## [0.3.1] - 2026-06-24
 
 ### Fixed

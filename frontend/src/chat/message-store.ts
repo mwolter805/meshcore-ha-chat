@@ -29,6 +29,7 @@ const ERROR_POLL_INTERVAL_MS = 60_000;
  */
 export class MessageStore {
   private _messages: ChatMessage[] = [];
+  private _pendingCalls = new Map<string, ChatMessage>();
   private _loading = false;
   private _error: string | null = null;
   private _entityId: string | null = null;
@@ -37,6 +38,7 @@ export class MessageStore {
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   /** Real-time event subscriptions (meshcore_message, meshcore_delivery_update) */
   private _realtimeSubscriptions: Array<() => void> = [];
+  private _realtimeGeneration = 0;
   private _retryCount = 0;
   private _onChange: (() => void) | null = null;
   private _fetchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -170,7 +172,16 @@ export class MessageStore {
    * Update config.
    */
   setConfig(config: PanelConfig): void {
+    const radioChanged = config.entry_id !== this._config.entry_id;
     this._config = config;
+    if (radioChanged) {
+      this._pendingCalls.clear();
+      this._stopUpdates();
+      this._entityId = null;
+      this._messages = [];
+      this._active = false;
+      this._notify();
+    }
   }
 
   /**
@@ -196,6 +207,7 @@ export class MessageStore {
     this._stopUpdates();
 
     this._entityId = entityId;
+    this._pendingCalls.clear();
     this._messages = [];
     this._error = null;
     this._retryCount = 0;
@@ -237,7 +249,7 @@ export class MessageStore {
   /**
    * Add a local optimistic message immediately (before API confirmation).
    */
-  addOptimisticMessage(sender: string, text: string): void {
+  addOptimisticMessage(sender: string, text: string): string {
     const now = new Date();
     const tempId = `optimistic_${now.getTime()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -253,6 +265,26 @@ export class MessageStore {
     };
 
     this._messages = [...this._messages, msg];
+    // Keep the original call separate from any heuristic success association.
+    this._pendingCalls.set(tempId, { ...msg });
+    this._notify();
+    return tempId;
+  }
+
+  confirmOptimisticMessage(id: string): void {
+    this._pendingCalls.delete(id);
+  }
+
+  markOptimisticFailed(id: string): void {
+    const original = this._pendingCalls.get(id);
+    this._pendingCalls.delete(id);
+    if (!original) return;
+    const failed: ChatMessage = {
+      ...original,
+      deliveryStatus: { status: 'failed', collecting: false },
+    };
+    this._messages = [...this._messages.filter(m => m.id !== id), failed];
+    this._messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
     this._notify();
   }
 
@@ -453,6 +485,7 @@ export class MessageStore {
    * Full cleanup — only for permanent discard.
    */
   destroy(): void {
+    this._pendingCalls.clear();
     this._stopUpdates();
     this._active = false;
     if (this._fetchDebounce) {
@@ -462,9 +495,16 @@ export class MessageStore {
     this._onChange = null;
   }
 
-  /**
-   * Fetch messages from the persistent message store via WS command.
-   */
+  private _keepOptimistic(message: ChatMessage, fetched: ChatMessage[]): boolean {
+    // A service error identifies only its local call, never a server row.
+    if (message.deliveryStatus?.status === 'failed') return true;
+    const copy = message.sendId
+      ? fetched.find(m => m.sendId === message.sendId || m.id === message.sendId)
+      : undefined;
+    return !copy;
+  }
+
+  /** Fetch messages from the persistent message store via WS command. */
   private async _fetchMessages(entityId: string): Promise<void> {
     if (!this._hass) return;
 
@@ -489,9 +529,7 @@ export class MessageStore {
       const fetchedIds = new Set(fetched.map((m) => m.id));
       const kept = this._messages.filter((m) => {
         if (m.id.startsWith('optimistic_')) {
-          // Remove optimistic messages once a real version arrives
-          const hasReal = fetched.some((f) => f.sender === m.sender && f.text === m.text);
-          return !hasReal;
+          return this._keepOptimistic(m, fetched);
         }
         if (m.id.startsWith('rt_')) {
           // Remove rt_ messages once the stored version arrives
@@ -567,10 +605,7 @@ export class MessageStore {
       const fetchedIds = new Set(fetched.map((m) => m.id));
       const kept = this._messages.filter((m) => {
         if (m.id.startsWith('optimistic_')) {
-          const hasReal = fetched.some(
-            (f) => f.sender === m.sender && f.text === m.text,
-          );
-          return !hasReal;
+          return this._keepOptimistic(m, fetched);
         }
         if (m.id.startsWith('rt_')) {
           const baseId = m.id.substring(3);
@@ -622,6 +657,7 @@ export class MessageStore {
    */
   private async _subscribeRealtime(entityId: string): Promise<void> {
     if (!this._hass) return;
+    const generation = this._realtimeGeneration;
 
     const unsubs: Array<() => void> = [];
 
@@ -629,24 +665,32 @@ export class MessageStore {
       // meshcore_message — incoming & outgoing messages
       const unsubMsg = await this._hass.connection.subscribeEvents(
         (event: HassEvent) => {
-          if (event.data.entity_id === entityId) {
+          if (generation === this._realtimeGeneration && this._active && this._entityId === entityId && event.data.entity_id === entityId) {
             this._handleRealtimeMessage(event.data);
           }
         },
         'meshcore_message',
       );
       unsubs.push(unsubMsg);
+      if (generation !== this._realtimeGeneration) {
+        unsubs.forEach(fn => fn());
+        return;
+      }
 
       // meshcore_delivery_update — delivery status updates
       const unsubDelivery = await this._hass.connection.subscribeEvents(
         (event: HassEvent) => {
-          if (event.data.entity_id === entityId) {
+          if (generation === this._realtimeGeneration && this._active && this._entityId === entityId && event.data.entity_id === entityId) {
             this._handleDeliveryUpdate(event.data);
           }
         },
         'meshcore_delivery_update',
       );
       unsubs.push(unsubDelivery);
+      if (generation !== this._realtimeGeneration) {
+        unsubs.forEach(fn => fn());
+        return;
+      }
 
       this._realtimeSubscriptions = unsubs;
     } catch (err) {
@@ -661,9 +705,10 @@ export class MessageStore {
    * display, then triggers a debounced store fetch for confirmation.
    */
   private _handleRealtimeMessage(eventData: Record<string, unknown>): void {
-    const sender = (eventData.sender_name ?? eventData.sender) as string;
+    if (eventData.entry_id && this._config.entry_id && eventData.entry_id !== this._config.entry_id) return;
+    const sender = String(eventData.sender_name || eventData.sender || eventData.pubkey_prefix || eventData.contact_public_key || 'Unknown');
     const text = (eventData.message ?? eventData.text) as string;
-    const isOutgoing = sender === this._config.node_name;
+    const isOutgoing = typeof eventData.outgoing === 'boolean' ? eventData.outgoing : sender === this._config.node_name;
 
     // Skip outgoing messages — they are already shown via the optimistic path.
     // Update delivery status on the existing optimistic message instead.
@@ -688,15 +733,17 @@ export class MessageStore {
           };
         }
 
-        // Update the optimistic message in place
-        for (let i = this._messages.length - 1; i >= 0; i--) {
-          const m = this._messages[i];
-          if (m.id.startsWith('optimistic_') && m.sender === sender && m.text === text) {
-            m.deliveryStatus = deliveryStatus;
-            if (rxLogData) m.rxLogData = rxLogData;
-            this._notify();
-            break;
-          }
+        deliveryStatus.repeatsObservable = eventData.repeats_observable as boolean | undefined;
+        deliveryStatus.collecting = eventData.collecting as boolean | undefined;
+        const sendId = eventData.send_id as string | undefined;
+        const exact = this._messages.find(m => sendId && (m.sendId === sendId || m.id === sendId));
+        const candidates = this._messages.filter(m => m.id.startsWith('optimistic_') && !m.sendId && m.deliveryStatus?.status !== 'failed' && m.sender === sender && m.text === text);
+        const m = exact ?? (candidates.length === 1 ? candidates[0] : undefined);
+        if (m) {
+          m.sendId = sendId;
+          if (m.deliveryStatus?.status !== 'failed') m.deliveryStatus = deliveryStatus;
+          if (rxLogData) m.rxLogData = rxLogData;
+          this._notify();
         }
       }
       // Trigger store fetch to replace optimistic with stored version.
@@ -752,7 +799,7 @@ export class MessageStore {
       const timestampStr = (eventData.timestamp as string) || new Date().toISOString();
       const timestamp = new Date(timestampStr);
 
-      const baseId = generateId(timestampStr, sender, displayText);
+      const baseId = (eventData.id || eventData.message_id || eventData.send_id) as string || generateId(timestampStr, sender, text);
       const id = `rt_${baseId}`;
 
       // Only insert if not already present
@@ -838,6 +885,7 @@ export class MessageStore {
    * The store is updated by the backend independently.
    */
   private _handleDeliveryUpdate(eventData: Record<string, unknown>): void {
+    if (eventData.entry_id && this._config.entry_id && eventData.entry_id !== this._config.entry_id) return;
     // Handle incoming message delivery updates (progressive rx_log_data)
     const rxLogData = eventData.rx_log_data as Array<Record<string, unknown>> | undefined;
     const progressive = eventData.progressive as boolean | undefined;
@@ -867,7 +915,7 @@ export class MessageStore {
 
     // Handle outgoing message delivery status
     const sendId = eventData.send_id as string | undefined;
-    const status = eventData.status as string | undefined;
+    const status = (eventData.delivery_status ?? eventData.status) as string | undefined;
     const repeaterCount = eventData.repeater_count as number | undefined;
     const ackReceived = eventData.ack_received as boolean | undefined;
     const roundTripMs = eventData.round_trip_ms as number | undefined;
@@ -886,22 +934,21 @@ export class MessageStore {
       derivedStatus = 'sent';
     }
 
-    // Find most recent outgoing message
-    let msg: ChatMessage | undefined;
-    for (let i = this._messages.length - 1; i >= 0; i--) {
-      if (this._messages[i].isOutgoing) {
-        msg = this._messages[i];
-        break;
-      }
-    }
+    const msg = this._messages.find(m => m.isOutgoing && (m.sendId === sendId || m.id === sendId));
 
     if (msg) {
+      if (msg.deliveryStatus?.collecting === false && isProgressive) return;
+      if (msg.deliveryStatus?.status === 'failed' && derivedStatus !== 'failed') return;
       msg.deliveryStatus = {
-        status: derivedStatus,
+        ...msg.deliveryStatus,
+        status: isProgressive ? (msg.deliveryStatus?.status ?? 'sent') : derivedStatus,
+        repeatsObservable: (eventData.repeats_observable as boolean | undefined) ?? msg.deliveryStatus?.repeatsObservable,
+        collecting: (eventData.collecting as boolean | undefined) ?? isProgressive ?? msg.deliveryStatus?.collecting,
         repeaterCount,
         ackReceived,
         roundTripMs,
       };
+      if (rxLogData) msg.rxLogData = rxLogData;
       if (repeaterCount !== undefined) {
         msg.repeaterCount = repeaterCount;
       }
@@ -1025,6 +1072,7 @@ export class MessageStore {
    * Stop all real-time updates and polling.
    */
   private _stopUpdates(): void {
+    this._realtimeGeneration++;
     if (this._pollTimer) {
       clearTimeout(this._pollTimer);
       this._pollTimer = null;
