@@ -6,30 +6,49 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [0.3.2] - Unreleased
 
-### Compatibility
+This release makes MeshCore Chat work properly with meshcore-ha 3.x. It has fixes only, no new features.
 
-- Require Home Assistant 2025.6 or newer, matching the core meshcore integration. The meshcore-ha minimum remains v2.7.0.
-- Use the parent integration's command service on newer parents, preserving its permissions, selected radio and command error responses.
-- Restore administrator-confirmed identity import and regeneration through the current parent connection, with coordinated commands, validated reconnection and verification after reload. Supported legacy behavior is retained.
+### Tested with
+
+- **meshcore-ha v3.0.5**, with the full test set. Also run against v3.0.4.
+- **meshcore-ha v2.7.0 and v2.10.0**, with a smaller check only.
+- **Home Assistant** 2025.6.0 and 2026.10.4 in tests, and 2026.11.1 on a live installation.
+- **meshcore_py** 2.3.17.
+
+### Requirements
+
+These are the same as meshcore-ha v3.0.5 itself requires.
+
+- Home Assistant 2025.6.0 or newer. This is a higher minimum than MeshCore Chat 0.3.1 had.
+- meshcore-ha v2.7.0 or newer.
+- MeshCore Chat installs no Python packages of its own. It uses two that meshcore-ha installs: `meshcore` (the meshcore_py library) 2.3.11 or newer, and `pynacl` 1.5.0 or newer.
 
 ### Fixed
 
-- Keep the Nodes view working alongside the separate MeshCore card by using a distinct internal contact component name.
-- Preserve completed channel delivery states and repeat-observation metadata. Show collecting, unobservable and observed-zero states separately.
-- Match delivery updates by send ID when supplied. Preserve a failed local send and its draft when its service call reports an error, without marking a different server message failed.
-- Keep first message loads and delivery updates from discarding each other's changes.
-- Read region settings from the selected radio's current options, including an explicitly cleared region list.
-- Scope device lookup and remote command replies to the selected radio. Refresh the discovered-contact cache after clearing contacts and support synchronous neighbor-save scheduling.
-- Show unnamed incoming direct messages immediately and keep the CLI Console counter out of telemetry displays.
-- Read the actual Path Hash Mode through the parent command service. Show Unknown for failed or unsupported reads, validate modes strictly, and ignore stale Settings reads or saves after a radio switch. Thanks to [@vharbich](https://github.com/vharbich) for [PR #49](https://github.com/mwolter805/meshcore-ha-chat/pull/49).
-- Preserve rejection of oversized UTF-8 messages and keep the composed text available; do not silently split or truncate messages.
+- **Region list is empty on meshcore-ha 3.x (#50, #53).** The channel dialog now reads your regions from where meshcore-ha 3.x keeps them. Older meshcore-ha versions still work. Clearing the region list is respected. The same fix was offered in #54. Thanks to [@Poket-Jony](https://github.com/Poket-Jony).
+- **Path Hash Mode always shows "1 byte".** Settings now reads the real value from the radio. If the radio does not answer, it shows "Unknown" and does not guess. Thanks to [@vharbich](https://github.com/vharbich) for [#49](https://github.com/mwolter805/meshcore-ha-chat/pull/49).
+- **The panel breaks when the separate MeshCore card is also installed (#39).** Both used the same internal name for a page element. MeshCore Chat now uses its own name, so the two can be installed together.
+- **Home Assistant warns about a deprecated device lookup (#45).** MeshCore Chat now uses the newer lookup, and looks devices up for the selected radio only.
+- **Commands on meshcore-ha 3.x.** Commands now go through meshcore-ha's own command service. This keeps its permission checks, sends the command to the radio you selected, and shows its real error messages.
+- **Identity import and regenerate on meshcore-ha 3.x.** An administrator can import or regenerate the radio's identity key again. MeshCore Chat waits for the radio to reconnect and checks that the new identity is the one that was requested. If the radio rejects the key, it is not rebooted.
+- **Delivery status.** A delivered channel message keeps its status. "Collecting", "cannot be observed" and "no repeaters heard it" are now shown as three different states.
+- **Failed sends.** If sending fails with an error, your text is kept so you can try again, and no other message is marked as failed by mistake.
+- **Messages loading at the same time as status updates.** They no longer overwrite each other.
+- **Direct messages from a sender with no name** now appear right away.
+- **Too-long messages** are still refused, and your text is kept. They are never cut short or split without telling you.
+- **Smaller fixes:** replies to remote commands go to the right radio, the node list refreshes after discovered contacts are cleared, and the CLI Console counter no longer appears among device readings.
+
+### Maintenance
+
+- The panel is now built with TypeScript 7 and a newer bundler. The panel file that ships is byte for byte the same as one built with the old tools.
+- The automated checks on GitHub use newer versions of their tools.
 
 ### Known limitations
 
-- A send that returns normally while the radio is offline can still remain unresolved. Failure events without a message identifier cannot safely identify which message failed.
-- Initial success-event association can still rely on message text. Locally failed bubbles and recovery drafts stay in page memory and do not change persisted server delivery facts.
-- Parent log handling is unchanged. The Path Hash Mode response sent to the browser includes only the validated mode.
-- Local checks cover selected HA versions and parent contracts, not every version combination. Physical mode accuracy, all-mode saving and persistence, identity hardware/key persistence and the newer identity flow on the older HA floor remain unverified. This SPI-free artifact has not been installed or tested on a live host or physical phone.
+- If the radio is offline but the send call still returns normally, a message can stay "sending". meshcore-ha's failure event does not say which message failed, so MeshCore Chat cannot always tell.
+- A message marked as failed in the panel, and its kept text, are remembered only until you reload the page.
+- Identity import and regenerate, and saving every Path Hash Mode, were tested with a simulated radio. They were not tested on a real radio through a reboot.
+- Not every combination of Home Assistant and meshcore-ha versions was tested. See "Tested with". meshcore-ha 2.x had only a smaller check; if you can, use meshcore-ha 3.0.5.
 
 ## [0.3.1] - 2026-06-24
 
