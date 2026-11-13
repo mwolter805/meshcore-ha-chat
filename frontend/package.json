@@ -22,7 +22,7 @@
     "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^12.3.0",
     "happy-dom": "^21.0.4",
-    "rollup": "^4.62.2",
+    "rollup": "^4.63.1",
     "tslib": "^2.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.12"
