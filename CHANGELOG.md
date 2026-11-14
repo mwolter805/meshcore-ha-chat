@@ -4,7 +4,7 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
-## [0.3.2] - Unreleased
+## [0.3.2] - 2026-11-13
 
 This release makes MeshCore Chat work properly with meshcore-ha 3.x. It has fixes only, no new features.
 
