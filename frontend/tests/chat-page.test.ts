@@ -370,6 +370,53 @@ describe('Phase 3 — chat-page drives the UnreadController', () => {
     expect(resetSpy).not.toHaveBeenCalled();
   });
 
+  it('re-checks mark-read when a realtime placeholder is replaced by its stored copy', async () => {
+    const page = await mountChatPage({ conversations: [makeChannel(0)] });
+    page.selectedId = '0';
+    await page.updateComplete;
+    clearScrollSettlingState(page);
+    stubLastMessageVisible(page, true);
+    const store = priv(page)._messageStore as unknown as {
+      _messages: ChatMessage[];
+    };
+    const msg = (id: string, minute: number): ChatMessage => ({
+      id,
+      sender: 'Bot',
+      text: `t${minute}`,
+      timestamp: new Date(Date.UTC(2026, 0, 1, 10, minute)),
+      isOutgoing: false,
+      isSystem: false,
+      raw: `Bot: t${minute}`,
+      mentions: [],
+    });
+
+    // Buffer with the reply still drawn as a realtime placeholder.
+    store._messages = [msg('m1', 0), msg('rt_r1', 5)];
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const spy = vi.spyOn(page.unread, 'onScrollState');
+
+    // A re-render with nothing changed runs no check.
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(spy).not.toHaveBeenCalled();
+
+    // The stored copy replaces the placeholder: same count, new tail.
+    store._messages = [msg('m1', 0), msg('r1', 5)];
+    page.requestUpdate();
+    await page.updateComplete;
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        entityId: 'binary_sensor.meshcore_aa_ch_0_messages',
+        lastMessageVisible: true,
+        bufferTailId: 'r1',
+      }),
+    );
+  });
+
   it('_jumpToBottom drains hasNewerMessages then routes through onPillJump', async () => {
     const page = await mountChatPage({ conversations: [makeChannel(0)] });
     page.selectedId = '0';

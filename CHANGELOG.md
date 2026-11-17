@@ -4,6 +4,10 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A conversation shows "1 new" for a message you already read.** When a message arrived while you were reading at the bottom of a conversation, it was not marked as read. After you switched to another conversation, the first one showed an unread badge for that message. Messages that arrive while you are at the bottom are now marked as read.
+
 ## [0.3.2] - 2026-11-13
 
 This release makes MeshCore Chat work properly with meshcore-ha 3.x. It has fixes only, no new features.

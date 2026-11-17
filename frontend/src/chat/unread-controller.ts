@@ -621,6 +621,32 @@ export class UnreadController {
 }
 
 /**
+ * Repeat-guard key for the mark-read mutators (`onScrollState` /
+ * `onPillJump` `bufferTailId`): the id of the newest buffer message,
+ * skipping the user's own `optimistic_*` sends (outgoing messages never
+ * count as unread).
+ *
+ * A realtime `rt_*` placeholder DOES count. An incoming message is
+ * drawn as an `rt_*` bubble first; if the key ignored it, the key would
+ * not change on arrival, the repeat guard would suppress the mark-read
+ * although the message is on screen, and the backend cursor would stay
+ * before it — the conversation then shows as unread once the user
+ * leaves it. When the stored copy later replaces the placeholder the
+ * key changes again (`rt_<id>` → `<id>`), and chat-page re-checks;
+ * that second request covers a mark-read that reached the backend
+ * before the message was stored.
+ */
+export function markReadTailKey(
+  messages: ReadonlyArray<{ id: string }>,
+): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const id = messages[i].id;
+    if (!id.startsWith('optimistic_')) return id;
+  }
+  return null;
+}
+
+/**
  * Pure label-selection helper for the "↓ N new" / "↓ unread" /
  * "↓ latest" jump-to-current pill. Centralizes the label
  * semantics that used to be inlined in chat-page's

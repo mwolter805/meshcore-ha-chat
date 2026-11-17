@@ -2,7 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { HomeAssistant, PanelConfig, Contact, Channel } from '../types';
 import { MessageStore } from '../chat/message-store';
-import { UnreadController, pillLabel } from '../chat/unread-controller';
+import { UnreadController, markReadTailKey, pillLabel } from '../chat/unread-controller';
 import { buildRenderItems } from '../chat/message-parser';
 import { discoverChannelEntity, discoverContactEntity } from '../chat/entity-resolver';
 import { sendDirectMessage, sendChannelMessage } from '../api';
@@ -81,6 +81,12 @@ export class ChatPage extends LitElement {
   private _scrollInFlight = false;
   private _scrollGuardUntil = 0;
   private _lastMessageCount = 0;
+  /**
+   * `markReadTailKey` of the buffer at the previous `updated()`. A
+   * change without buffer growth (a realtime placeholder replaced by
+   * its stored copy) re-runs the at-bottom mark-read check.
+   */
+  private _lastTailKey: string | null = null;
   /**
    * The per-conversation read-progress machine — the anchor, the grace
    * window, the deferred post-switch mark-read timer, the mark-read
@@ -590,6 +596,7 @@ export class ChatPage extends LitElement {
         this._conversationResolved = false;
         this._pendingScroll = null;
         this._lastMessageCount = 0;
+        this._lastTailKey = null;
         // The anchor, the grace window, the deferred
         // post-switch timer, the mark-read dedup guard, and the
         // markReadFired lifecycle all live in the controller now —
@@ -660,6 +667,7 @@ export class ChatPage extends LitElement {
         // Sync message count so the auto-scroll branch below doesn't
         // re-trigger on the same batch of messages that just loaded.
         this._lastMessageCount = store.messages.length;
+        this._lastTailKey = markReadTailKey(store.messages);
       } else if (doneLoading && store.messages.length === 0) {
         // No messages in this conversation — nothing to scroll to
         this._pendingScroll = null;
@@ -671,10 +679,19 @@ export class ChatPage extends LitElement {
       // user-was-at-bottom; it fires _checkAndMarkReadIfAtBottom itself
       // when it actually performs the scroll.
       const currentCount = this._messageStore.messages.length;
+      const tailKey = markReadTailKey(this._messageStore.messages);
       if (currentCount > this._lastMessageCount && this._lastMessageCount > 0) {
         this._scrollToBottomIfNearEnd();
+      } else if (this._lastMessageCount > 0 && tailKey !== this._lastTailKey) {
+        // The tail changed without the buffer growing — a realtime
+        // placeholder was replaced by its stored copy. Nothing scrolls,
+        // so no scroll event will run the check; run it here. The
+        // controller's gates (grace window, last-message-visible,
+        // repeat guard) still apply.
+        this._checkAndMarkReadIfAtBottom();
       }
       this._lastMessageCount = currentCount;
+      this._lastTailKey = tailKey;
     }
   }
 
@@ -1080,6 +1097,7 @@ export class ChatPage extends LitElement {
       // can produce a divider for that mode.
       this._pendingScroll = (anchor || unreadCount > 0) ? 'last-read' : 'bottom';
       this._lastMessageCount = 0; // Reset so auto-scroll doesn't trigger during initial load
+      this._lastTailKey = null;
 
       // Hand the read-progress machine to the controller.
       // `beginConversation` captures the anchor from the controller's
@@ -1164,8 +1182,9 @@ export class ChatPage extends LitElement {
    * the backend's `mark_read` would advance to: the backend's
    * `ws_mark_read` calls `store.get_messages(entity_id, limit=1)`
    * which returns the chronologically-newest STORED message — `rt_*`
-   * and `optimistic_*` placeholders never reach the store. Passed into
-   * the controller's mark-read mutators as the buffer-tail dedup key.
+   * and `optimistic_*` placeholders never reach the store. Used by the
+   * pill's `cursorAtTail` query; the mark-read repeat guard uses
+   * `markReadTailKey` instead, which counts realtime placeholders.
    */
   private _latestNonTempMessageId(): string | null {
     const messages = this._messageStore?.messages ?? [];
@@ -1528,7 +1547,7 @@ export class ChatPage extends LitElement {
       entityId: this._currentEntityId,
       lastMessageVisible: this._isLastMessageVisible(),
       hasNewerMessages: store.hasNewerMessages,
-      bufferTailId: this._latestNonTempMessageId(),
+      bufferTailId: markReadTailKey(store.messages),
     });
     if (fired) store.resetNewMessagesCounter();
   }
@@ -1565,7 +1584,7 @@ export class ChatPage extends LitElement {
       // the "↓ N new" counter.
       const fired = this.unread.onPillJump({
         entityId: this._currentEntityId,
-        bufferTailId: this._latestNonTempMessageId(),
+        bufferTailId: markReadTailKey(store.messages),
       });
       if (fired) store.resetNewMessagesCounter();
     });
