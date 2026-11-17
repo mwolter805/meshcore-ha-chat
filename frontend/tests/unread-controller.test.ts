@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { UnreadController, pillLabel } from '../src/chat/unread-controller';
+import { UnreadController, markReadTailKey, pillLabel } from '../src/chat/unread-controller';
 import { MARK_READ_GRACE_PERIOD_MS } from '../src/constants';
 import type { RenderItem } from '../src/types';
 
@@ -1038,5 +1038,28 @@ describe('pillLabel', () => {
         cursorAtTail: true,
       }),
     ).toBe('↓ unread');
+  });
+});
+
+describe('markReadTailKey', () => {
+  it('returns null for an empty buffer', () => {
+    expect(markReadTailKey([])).toBeNull();
+  });
+
+  it('counts a realtime rt_ placeholder at the tail', () => {
+    expect(markReadTailKey([{ id: 'm1' }, { id: 'rt_r1' }])).toBe('rt_r1');
+  });
+
+  it('skips the user\'s own optimistic sends', () => {
+    expect(
+      markReadTailKey([{ id: 'm1' }, { id: 'optimistic_1' }]),
+    ).toBe('m1');
+    expect(markReadTailKey([{ id: 'optimistic_1' }])).toBeNull();
+  });
+
+  it('changes when the stored copy replaces the placeholder', () => {
+    const before = markReadTailKey([{ id: 'm1' }, { id: 'rt_r1' }]);
+    const after = markReadTailKey([{ id: 'm1' }, { id: 'r1' }]);
+    expect(before).not.toBe(after);
   });
 });
