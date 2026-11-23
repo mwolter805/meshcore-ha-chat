@@ -10,8 +10,13 @@ import type {
 import '../components/contact-card';
 import '../components/node-card';
 import '../components/node-detail-dialog';
+import '../components/nodes-map';
+import { loadOwnPosition } from '../utils/own-position';
 
 const PAGE_SIZE = 50;
+/** Page size when the map collects every node that matches the filters. */
+const MAP_PAGE_SIZE = 500;
+const VIEW_STORAGE_KEY = 'meshcore-nodes-view';
 
 type NodeType = 'clients' | 'repeaters' | 'room_servers' | 'sensors';
 const NODE_TYPE_MAP: Record<NodeType, number> = {
@@ -62,6 +67,15 @@ export class NodesPage extends LitElement {
   // the modal. Set when the action is dispatched, cleared by the parent
   // panel's try/finally after the WS call resolves.
   @state() private _pendingAction: 'add-contact' | 'remove-contact' | null = null;
+
+  // ─── List / map view ────────────────────────────────────────────────
+  @state() private _view: 'list' | 'map' = NodesPage._storedView();
+  /** Every node matching the filters (the list loads only a page at a time). */
+  @state() private _mapContacts: Contact[] = [];
+  @state() private _mapLoading = false;
+  @state() private _home: { lat: number; lon: number } | null = null;
+  /** Bumped on each map load so a slower, older load can't overwrite a newer one. */
+  private _mapLoadSeq = 0;
 
   // ─── Sort state ─────────────────────────────────────────────────────
   @state() private _sortBy: 'last_heard' | 'name' | 'prefix' = 'last_heard';
@@ -309,6 +323,28 @@ export class NodesPage extends LitElement {
       background: var(--primary-background-color, #fafafa);
     }
 
+    .content-area.map-view {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .view-btn {
+      padding: 6px 12px;
+      border: 1px solid var(--divider-color, #e0e0e0);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--secondary-text-color, #727272);
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .view-btn:hover {
+      background: var(--primary-color, #03a9f4);
+      color: #fff;
+      border-color: var(--primary-color, #03a9f4);
+    }
+
     .content-area::-webkit-scrollbar { width: 6px; }
     .content-area::-webkit-scrollbar-track { background: transparent; }
     .content-area::-webkit-scrollbar-thumb {
@@ -427,6 +463,8 @@ export class NodesPage extends LitElement {
     // results and re-fetch counts + page so the displayed grid reflects
     // the new entry rather than stale data from the previous one.
     if (changedProperties.has('config')) {
+      this._home = null;
+      this._mapContacts = [];
       this._displayedContacts = [];
       this._totalCount = 0;
       this._loadCounts();
@@ -445,12 +483,10 @@ export class NodesPage extends LitElement {
             ${this._renderL1Button('discovered', 'Discovered')}
           </div>
 
-          <!-- Level 2 filters (hidden when L1 = All) -->
-          ${this._primaryFilter !== 'all' ? html`
-            <div class="l2-bar">
-              ${this._renderL2Buttons()}
-            </div>
-          ` : nothing}
+          <!-- Level 2 filters: node type, combined with Level 1 (AND) -->
+          <div class="l2-bar">
+            ${this._renderL2Buttons()}
+          </div>
 
           <!-- Search + actions row -->
           <div class="header-actions">
@@ -484,12 +520,17 @@ export class NodesPage extends LitElement {
               @click=${() => this._syncAll()}>
               ⟳ Sync
             </button>
+            <button class="view-btn"
+              title=${this._view === 'map' ? 'Show nodes as a list' : 'Show nodes on a map'}
+              @click=${() => this._setView(this._view === 'map' ? 'list' : 'map')}>
+              ${this._view === 'map' ? '☰ List' : '🗺 Map'}
+            </button>
           </div>
         </div>
 
         <!-- Content area -->
-        <div class="content-area">
-          ${this._renderContactsContent()}
+        <div class="content-area ${this._view === 'map' ? 'map-view' : ''}">
+          ${this._view === 'map' ? this._renderMap() : this._renderContactsContent()}
         </div>
       </div>
 
@@ -530,7 +571,7 @@ export class NodesPage extends LitElement {
   private _renderL2Buttons() {
     const types: NodeType[] = ['clients', 'repeaters', 'room_servers', 'sensors'];
     return types
-      .filter((t) => this._typeCounts[t] > 0)
+      .filter((t) => this._typeCounts[t] > 0 || this._typeFilter === t)
       .map((t) => {
         const isActive = this._typeFilter === t;
         return html`
@@ -548,7 +589,6 @@ export class NodesPage extends LitElement {
   private _setPrimaryFilter(category: PrimaryCategory) {
     if (this._primaryFilter === category) return;
     this._primaryFilter = category;
-    this._typeFilter = null;
     this._displayedContacts = [];
     this._totalCount = 0;
     this._loadPage(true);
@@ -577,7 +617,7 @@ export class NodesPage extends LitElement {
   private _getSearchPlaceholder(): string {
     const cat = this._primaryFilter;
     const type = this._typeFilter ? TYPE_LABELS[this._typeFilter].toLowerCase() : 'nodes';
-    if (cat === 'all') return 'Search all nodes...';
+    if (cat === 'all') return `Search all ${type}...`;
     return `Search ${cat} ${type}...`;
   }
 
@@ -608,6 +648,7 @@ export class NodesPage extends LitElement {
       }
       this._totalCount = result.total;
       this._typeCounts = result.counts;
+      if (reset && this._view === 'map') void this._loadMapContacts();
     } catch (err) {
       console.error('Failed to load contacts:', err);
     } finally {
@@ -642,6 +683,71 @@ export class NodesPage extends LitElement {
     this._loadPage(true);
     this._loadCounts();
     this.dispatchEvent(new CustomEvent('contacts-changed', { bubbles: true, composed: true }));
+  }
+
+  // ─── Map view ─────────────────────────────────────────────────────
+
+  private static _storedView(): 'list' | 'map' {
+    try {
+      return localStorage.getItem(VIEW_STORAGE_KEY) === 'map' ? 'map' : 'list';
+    } catch {
+      return 'list';
+    }
+  }
+
+  private _setView(view: 'list' | 'map') {
+    this._view = view;
+    try {
+      localStorage.setItem(VIEW_STORAGE_KEY, view);
+    } catch {
+      // localStorage full or unavailable
+    }
+    if (view === 'map') void this._loadMapContacts();
+  }
+
+  /** Every node matching the current filters and search, a large page at a time. */
+  private async _loadMapContacts() {
+    if (!this.hass) return;
+    const seq = ++this._mapLoadSeq;
+    this._mapLoading = true;
+    if (!this._home) {
+      void loadOwnPosition(this.hass, this.config?.entry_id).then((pos) => { this._home = pos; });
+    }
+    try {
+      const nodeType = this._typeFilter ? NODE_TYPE_MAP[this._typeFilter] : undefined;
+      const search = this._searchQuery.trim() || undefined;
+      const all: Contact[] = [];
+      for (;;) {
+        const result = await getContactsPaginated(this.hass, this._primaryFilter, {
+          nodeType,
+          search,
+          limit: MAP_PAGE_SIZE,
+          offset: all.length,
+          entryId: this.config?.entry_id,
+          sortBy: this._sortBy,
+        });
+        if (seq !== this._mapLoadSeq) return;
+        all.push(...result.contacts);
+        if (result.contacts.length === 0 || all.length >= result.total) break;
+      }
+      this._mapContacts = all;
+    } catch (err) {
+      console.error('Failed to load contacts for the map:', err);
+    } finally {
+      if (seq === this._mapLoadSeq) this._mapLoading = false;
+    }
+  }
+
+  private _renderMap() {
+    return html`
+      <meshcore-nodes-map
+        .hass=${this.hass}
+        .nodes=${this._mapContacts}
+        .home=${this._home}
+        ?loading=${this._mapLoading}
+        @node-selected=${(e: CustomEvent<{ node: Contact }>) => this._openNodeDetail(e.detail.node)}>
+      </meshcore-nodes-map>
+    `;
   }
 
   // ─── Contact cards rendering ──────────────────────────────────────

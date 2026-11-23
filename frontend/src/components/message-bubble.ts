@@ -1,8 +1,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { ChatMessage, MessageGroup, DeliveryStatus } from '../types';
+import type { ChatMessage, MessageGroup, DeliveryStatus, HomeAssistant } from '../types';
 import { formatTimestamp } from '../chat/message-parser';
 import { attachDialogA11y } from '../utils/dialog-a11y';
+import { hasMapPath } from './path-map';
+import './path-map';
 
 /**
  * Generate a deterministic color from a string (e.g., pubkey prefix).
@@ -21,15 +23,22 @@ export class MessageBubble extends LitElement {
   @property({ type: Object }) group?: MessageGroup;
   @property({ type: Object }) message?: ChatMessage;
   @property({ type: String }) timestampFormat: 'relative' | 'time' | 'datetime' = 'relative';
+  /**
+   * Getter rather than `hass`, so bubbles don't re-render on every Home
+   * Assistant state change. Only the route map uses it.
+   */
+  @property({ attribute: false }) getHass?: () => HomeAssistant | undefined;
+  @property({ type: String }) entryId?: string;
 
   @state() private _selectedMessage: ChatMessage | null = null;
+  @state() private _showRouteMap = false;
 
   constructor() {
     super();
     // Focus trap + Escape closes the message-action sheet.
     attachDialogA11y(this, {
       isOpen: () => this._selectedMessage !== null,
-      onEscape: () => { this._selectedMessage = null; },
+      onEscape: () => { this._selectedMessage = null; this._showRouteMap = false; },
       getScope: () => this.shadowRoot?.querySelector('.message-dialog'),
     });
   }
@@ -226,6 +235,13 @@ export class MessageBubble extends LitElement {
       z-index: 21;
     }
 
+    .message-dialog.with-map {
+      width: min(560px, 94vw);
+      max-width: none;
+      max-height: 92vh;
+      overflow-y: auto;
+    }
+
     .message-dialog-preview {
       padding: 12px 16px;
       font-size: 13px;
@@ -339,7 +355,7 @@ export class MessageBubble extends LitElement {
         : '';
 
     return html`
-      <div class=${this._classMap(bubbleClasses)} data-msg-id=${msg.id} @click=${(e: Event) => { e.stopPropagation(); this._selectedMessage = msg; }}>
+      <div class=${this._classMap(bubbleClasses)} data-msg-id=${msg.id} @click=${(e: Event) => { e.stopPropagation(); this._selectedMessage = msg; this._showRouteMap = false; }}>
         <div class="message-text">${this._renderTextWithMentions(msg.text, msg.mentions)}</div>
         <div class="timestamp">${statusLabel ? html`<span class="delivery-status">${statusLabel}</span> · ` : ''}${ts}${scopeLabel ? html` · <span class="flood-scope">${scopeLabel}</span>` : ''}</div>
       </div>
@@ -443,8 +459,8 @@ export class MessageBubble extends LitElement {
     const footerStyle = 'padding: 8px 16px; font-size: 12px; color: var(--secondary-text-color); border-top: 1px solid var(--divider-color, #e0e0e0);';
 
     return html`
-      <div class="message-dialog-overlay" @click=${() => { this._selectedMessage = null; }}>
-        <div class="message-dialog"
+      <div class="message-dialog-overlay" @click=${() => { this._selectedMessage = null; this._showRouteMap = false; }}>
+        <div class="message-dialog ${this._showRouteMap ? 'with-map' : ''}"
              role="dialog" aria-modal="true" aria-label="Message actions"
              @click=${(e: Event) => e.stopPropagation()}>
           <div class="message-dialog-preview">${msg.text}</div>
@@ -463,6 +479,17 @@ export class MessageBubble extends LitElement {
                 <div class="message-dialog-route" @click=${() => this._copyText(routeText)}>
                   Route: ${routeText}
                 </div>
+              `
+            : html``}
+          ${this.getHass && hasMapPath(msg)
+            ? html`
+                <button class="message-dialog-action"
+                  @click=${() => { this._showRouteMap = !this._showRouteMap; }}>
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align: -2px; margin-right: 4px;"><path d="M20.5 3l-.16.03L15 5.1 9 3 3.36 4.9c-.21.07-.36.25-.36.48V20.5c0 .28.22.5.5.5l.16-.03L9 18.9l6 2.1 5.64-1.9c.21-.07.36-.25.36-.48V3.5c0-.28-.22-.5-.5-.5zM15 19l-6-2.11V5l6 2.11V19z"/></svg>${this._showRouteMap ? 'Hide Route Map' : 'Show Route on Map'}
+                </button>
+                ${this._showRouteMap
+                  ? html`<meshcore-path-map .getHass=${this.getHass} .message=${msg} .entryId=${this.entryId}></meshcore-path-map>`
+                  : html``}
               `
             : html``}
           <div style=${footerStyle}>

@@ -4,6 +4,14 @@ All notable changes to **MeshCore Chat for Home Assistant** are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Nodes on a map.** A **Map** button on the Nodes tab shows every node with a known position on Home Assistant's own map, the same one as its Map dashboard, following your theme. Each node is labelled with its 2-character ID (the first byte of its public key, as it appears in message routes), with a border coloured by type. Nearby nodes group into a numbered circle; tap it to zoom in, or turn grouping off with the button on the map to see every node. Tap a node to open its details, with Trace, Add to Contacts and Message. The map shows the same nodes as the list, using the current filters and search, and keeps its view when the filters change.
+- **A message's route on a map.** **Show Route on Map** in the message dialog draws the path from the sender, through the repeaters, to you, with the distance of each leg. Repeaters are matched to your contacts by their path prefix. When a message was heard over more than one path, each path has its own tab.
+- **Type filter with "All".** The Clients / Repeaters / Room Servers / Sensors filter now also shows when **All** is selected, and it is kept when you switch between All, Added and Discovered, so you can for example show all repeaters.
+
+The maps use Home Assistant's own map component (`ha-map`, the one behind its Map card), so they need Home Assistant 2026.10 or newer; on an older version the map area shows a short note, and the route's hop list and distances still work. No map data is fetched from outside Home Assistant. Route matching is ported, trimmed down, from [MeshCore Chattx](https://github.com/michalsiman/meshcore-ha-chattx) by Michal Šiman (MIT).
+
 ### Fixed
 
 - **A conversation shows "1 new" for a message you already read.** When a message arrived while you were reading at the bottom of a conversation, it was not marked as read. After you switched to another conversation, the first one showed an unread badge for that message. Messages that arrive while you are at the bottom are now marked as read.

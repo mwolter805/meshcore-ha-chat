@@ -18,6 +18,8 @@ import '../components/message-search';
 @customElement('meshcore-chat-page')
 export class ChatPage extends LitElement {
   @property({ type: Object }) hass?: HomeAssistant;
+  /** Stable getter for children that need hass without re-rendering on every state change. */
+  private _getHass = () => this.hass;
   @property({ type: Object }) config?: PanelConfig;
   @property({ type: Array }) conversations: Array<Contact | Channel> = [];
   @property({ type: String }) selectedId: string | null = null;
@@ -936,6 +938,8 @@ export class ChatPage extends LitElement {
       results.push(html`
         <meshcore-message-bubble
           .group=${item.group}
+          .getHass=${this._getHass}
+          .entryId=${this.config?.entry_id}
           .timestampFormat=${this.config?.timestamp_format ?? 'relative'}></meshcore-message-bubble>
       `);
       messageIdx++;
